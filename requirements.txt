@@ -1,0 +1,4 @@
+bleak>=0.21
+streamlit>=1.30
+streamlit-autorefresh>=1.0.1
+pandas>=2.0
