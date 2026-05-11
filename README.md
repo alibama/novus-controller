@@ -1,9 +1,6 @@
 # novus-controller
 novus n20k48 streamlit controller software
 
-
-# novus-n20k48-ble
-
 An unofficial Python client and web dashboard for **Novus N20K48** process
 controllers over their Bluetooth Low Energy interface — the same interface
 used by Novus's *QuickTune Mobile* app.
