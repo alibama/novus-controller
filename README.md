@@ -1,5 +1,6 @@
 # novus-controller
 novus n20k48 streamlit controller software
+<img width="1403" height="783" alt="Screenshot 2026-05-07 at 5 53 44 PM" src="https://github.com/user-attachments/assets/ed73a4e6-4f81-467d-976e-05377c8bf9f5" />
 
 An unofficial Python client and web dashboard for **Novus N20K48** process
 controllers over their Bluetooth Low Energy interface — the same interface
