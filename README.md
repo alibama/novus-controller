@@ -60,7 +60,7 @@ See [`PROTOCOL.md`](PROTOCOL.md) for the complete list of open questions.
 
 ### Install
 ```bash
-git clone https://github.com/<your-user>/novus-n20k48-ble.git
+git clone https://github.com/<your-user>/novus-controller.git
 cd novus-n20k48-ble
 python3 -m venv .venv
 source .venv/bin/activate
