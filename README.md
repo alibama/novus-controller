@@ -7,7 +7,7 @@ controllers over their Bluetooth Low Energy interface — the same interface
 used by Novus's *QuickTune Mobile* app.
 
 The protocol was reverse-engineered from packet captures of a single
-QuickTune Mobile session against a running N20K48; see [`PROTOCOL.md`](PROTOCOL.md)
+QuickTune Mobile session against a running N20K48; see https://github.com/alibama/novus-controller/blob/main/protocol.md
 for the full decode. **This work is unofficial and not affiliated with
 Novus Automation.** It exists because the controllers are deployed in
 a small glass studio where the operator wanted a single web dashboard
@@ -16,7 +16,7 @@ doesn't cover.
 
 > [!IMPORTANT]
 > Use at your own risk. Writing to the wrong register on a kiln can
-> ruin a firing or worse. Read [`PROTOCOL.md`](PROTOCOL.md) before
+> ruin a firing or worse. Read https://github.com/alibama/novus-controller/blob/main/protocol.md before
 > doing anything beyond reading PV/SP.
 
 ---
@@ -188,7 +188,7 @@ especially:
 - Support for related Novus controllers (N1200, N480D, etc.)
 
 If you're on the Novus team and would like to engage, the open questions
-are laid out in [`PROTOCOL.md`](PROTOCOL.md). Happy to talk.
+are laid out in https://github.com/alibama/novus-controller/blob/main/protocol.md + happy to talk.
 
 ## Acknowledgments
 
@@ -200,4 +200,4 @@ are laid out in [`PROTOCOL.md`](PROTOCOL.md). Happy to talk.
 
 ## License
 
-MIT — see [`LICENSE`](LICENSE).
+MIT — use it any way you want, not attribution necessary
