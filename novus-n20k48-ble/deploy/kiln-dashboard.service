@@ -1,0 +1,40 @@
+# /etc/systemd/system/kiln-dashboard.service
+#
+# Runs the Streamlit dashboard (which also logs to CSV) as a SYSTEM service.
+# Because it's a system service on multi-user.target, it starts at boot with
+# NO login required. It binds to 127.0.0.1 only — Tailscale Serve/Funnel
+# proxies it out, so it is never exposed directly on the LAN.
+#
+# Install: see SETUP.md. Adjust User=, Group=, and the three paths if your
+# username or directory differ from the defaults below.
+
+[Unit]
+Description=Crozet Glass kiln dashboard (Streamlit + BLE, with logging)
+After=network-online.target bluetooth.service
+Wants=network-online.target
+Requires=bluetooth.service
+
+[Service]
+Type=simple
+User=youruser
+Group=youruser
+WorkingDirectory=/home/youruser/novus-n20k48-ble
+Environment="PATH=/home/youruser/novus-n20k48-ble/.venv/bin:/usr/local/bin:/usr/bin:/bin"
+# Bind to localhost; Tailscale Serve/Funnel exposes it. headless=true stops
+# Streamlit trying to open a browser or prompt for telemetry.
+ExecStart=/home/youruser/novus-n20k48-ble/.venv/bin/streamlit run kiln_dashboard.py \
+          --server.address 127.0.0.1 \
+          --server.port 8501 \
+          --server.headless true
+
+# Keep it alive no matter what. StartLimitIntervalSec=0 means systemd will
+# never stop retrying, even after many rapid failures (e.g. kilns powered off).
+Restart=always
+RestartSec=10
+StartLimitIntervalSec=0
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

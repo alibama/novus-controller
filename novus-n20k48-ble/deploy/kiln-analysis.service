@@ -1,0 +1,34 @@
+# /etc/systemd/system/kiln-analysis.service
+#
+# OPTIONAL. The analysis page only READS the CSV logs — it never touches
+# Bluetooth — so it can safely run at the same time as the dashboard.
+# It runs on port 8502. Expose it via Tailscale Serve on a different path
+# or port if you want remote access (see SETUP.md, "optional extras").
+#
+# If you don't want a second always-on app, skip this entirely and just run
+#   streamlit run kiln_analysis.py --server.port 8502
+# by hand whenever you want to look at performance data.
+
+[Unit]
+Description=Crozet Glass kiln analysis (read-only, CSV logs)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=youruser
+Group=youruser
+WorkingDirectory=/home/youruser/novus-n20k48-ble
+Environment="PATH=/home/youruser/novus-n20k48-ble/.venv/bin:/usr/local/bin:/usr/bin:/bin"
+ExecStart=/home/youruser/novus-n20k48-ble/.venv/bin/streamlit run kiln_analysis.py \
+          --server.address 127.0.0.1 \
+          --server.port 8502 \
+          --server.headless true
+Restart=always
+RestartSec=10
+StartLimitIntervalSec=0
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

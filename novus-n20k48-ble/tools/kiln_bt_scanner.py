@@ -4,7 +4,7 @@ Novus Kiln Controller BT Scanner
 Streamlit app for discovering Bluetooth Low Energy devices, with focus on
 Novus-brand kiln/process controllers (QuickTune Mobile compatible).
 
-Designed to run ON the machine with the Bluetooth radio 
+Designed to run ON the machine with the Bluetooth radio (youruser-latitude-5285)
 and be accessed over Tailscale from anywhere.
 
 Setup (on the shop laptop):
@@ -13,7 +13,8 @@ Setup (on the shop laptop):
 Run:
     streamlit run kiln_bt_scanner.py --server.address 0.0.0.0 --server.port 8501
 
-
+Then from any tailnet machine:
+    http://your-kiln-host:8501
 """
 
 import asyncio

@@ -44,26 +44,64 @@ Function codes (Modbus-like, but in the user-defined range 0x41–0x48)
         request:   01 2b 0e <read_id_code:1> <object_id:1>
 
 ────────────────────────────────────────────────────────────────────────
-Verified registers (from trace + IoThrifty docs + Novus protocol PDF)
+Register map — from the OFFICIAL Novus protocol document
+("N20K48 MODULAR CONTROLLER COMMUNICATION PROTOCOL V1.0x A")
 ────────────────────────────────────────────────────────────────────────
 
-  53   (0x0035)  COMMIT              — write 1 to commit pending config
-  200  (0x00C8)  SETPOINT            (signed int16, scaled by decimal-point)
-  201  (0x00C9)  PROCESS_VARIABLE    (signed int16, scaled by decimal-point)
-  202  (0x00CA)  CONTROL_OUTPUT      (0..1000 = 0.0..100.0%)
-  208  (0x00D0)  USER_MANUAL_SP      (preserved across mode changes)
-  213  (0x00D5)  PROGRAM_TO_VIEW     (which program QuickTune is editing)
-  214  (0x00D6)  PROGRAM_EXECUTING   (0 = stopped; 1..20 = running that program)
-  215  (0x00D7)  CURRENT_SEGMENT     (segment index within executing program)
+The BLE register addresses are identical to the RS-485 Modbus map; we
+confirmed this against 200/201/202, which match the doc exactly. Earlier
+reverse-engineered guesses for 213/214/247 were WRONG and are corrected
+here.
 
-Verified by before/after probe of bubba: starting a program in QuickTune
-flipped reg 214 from 0 → 1 and reg 202 from 0 → 1000 (heater on).
+  51   PROTECTION    Password protection level (1..4)
+  53   OPEN_SESSION  Write password here to unlock config writes (0..65535)
+  77   AI_UNIT       Temperature unit: 0 = °C, 1 = °F
+  200  CTRL_SP       Main setpoint
+  201  CTRL_PV1      Process variable (for temperature, value is ×10 — see note)
+  202  CTRL_MV1      Output power, 0..1000 = 0.0..100.0 %
+  213  CTRL_AUTO     Control mode: 0 = manual, 1 = automatic
+  214  CTRL_RUN      Run: 0 = stopped, 1 = running
+  219  CTRL_HYST     ON/OFF control hysteresis
+  220  CTRL_SPLL     Setpoint lower limit
+  221  CTRL_SPHL     Setpoint upper limit
+  224  CTRL_OULL     Output lower limit
+  225  CTRL_OUHL     Output upper limit
+  226  CTRL_SFST     Soft-start time (s)
+  247  RS_PRN_EXEC   Ramp&Soak program being executed (0..20) ← SELECT here
+  248  RS_PRN_EDIT   Ramp&Soak program to view/edit (0..20)
+  249  RS_SEG        Current program segment (0..20)
+  250  RS_SEG_TIME   Current segment elapsed time (s)
+  252  RS_TBAS       R&S time base: 0 = seconds, 1 = minutes
+  254  RS_PROG_TYPE  0 = none, 1 = ramp-to-soak, 2 = R&S program
+  257  TUNE_AUTO     Autotune mode (0..5)
+  258  TUNE_PB       Proportional band
+  259  TUNE_IR       Integral rate (repetitions/min)
+  260  TUNE_DT       Derivative time (s)
+  261  TUNE_CT       PWM cycle period (s)
+  279  INPUT_DPPO    Decimal point: 0=XXXX, 1=XXX.X, 2=XX.XX, 3=X.XXX
 
-Program data lives in the 500–1100 range (programs 1..N, segments
-of 3 registers each: SP, duration_minutes, event) and 2600+
-(program metadata). Decimal-point setting is its own register in
-the 0..50 config block; default to 0 unless your panel reads
-fractional degrees.
+NOTE on scaling: the protocol doc states that for temperature inputs the
+PV register is always ×10 regardless of INPUT_DPPO. In practice, read
+INPUT_DPPO (279) and AI_UNIT (77) and reconcile against the front panel
+to be certain. The client exposes `decimal_places` as a manual override.
+
+────────────────────────────────────────────────────────────────────────
+Program table layout (each program is a 40-register block)
+────────────────────────────────────────────────────────────────────────
+
+  base(N) = 400 + (N-1) * 40       for program N in 1..20
+
+  base + 0   PTOL    Program tolerance (guaranteed-soak band). The segment
+                     timer only advances while |PV - SP| <= PTOL. 0 often
+                     means "no hold-back" (timer runs on the clock).
+  base + 1   LP      Link to another program (0 = none, 1..20)
+  base + 2   PSP0    Setpoint 0 — the program's starting setpoint
+  then 9 segments, 3 registers each, for k = 1..9:
+    base + 3*k       PT(k)   Time of segment k    (minutes if RS_TBAS=1)
+    base + 3*k + 1   PE(k)   Event of segment k   (0..15, digital outputs)
+    base + 3*k + 2   PSP(k)  Setpoint of segment k
+
+  Program N therefore occupies base..base+29; base+30..+39 are reserved.
 """
 
 from __future__ import annotations
@@ -86,15 +124,57 @@ FC_WRITE_MULTIPLE       = 0x48
 FC_READ_DEVICE_ID       = 0x2B    # followed by sub-FC 0x0E (MEI Type 14)
 MEI_READ_DEVICE_ID      = 0x0E
 
-# Verified register addresses
-REG_COMMIT          = 53
-REG_SETPOINT        = 200
-REG_PV              = 201
-REG_OUTPUT_PCT      = 202
-REG_USER_MANUAL_SP  = 208
-REG_PROGRAM_TO_VIEW = 213
-REG_PROGRAM_EXEC    = 214   # 0 = stopped, 1..20 = running that program
-REG_CURRENT_SEGMENT = 215
+# ---- Register addresses (official N20K48 protocol V1.0x) ----
+# Session / protection
+REG_PROTECTION    = 51     # password protection level (1..4)
+REG_OPEN_SESSION  = 53     # write password to unlock config writes
+REG_UNIT          = 77     # 0 = °C, 1 = °F
+# Operation cycle
+REG_SETPOINT      = 200    # CTRL_SP
+REG_PV            = 201    # CTRL_PV1  (temperature: value is ×10 — verify)
+REG_OUTPUT_PCT    = 202    # CTRL_MV1  (0..1000 = 0..100.0%)
+REG_CTRL_AUTO     = 213    # 0 = manual, 1 = automatic
+REG_CTRL_RUN      = 214    # 0 = stopped, 1 = running
+REG_HYST          = 219
+REG_SPLL          = 220    # setpoint lower limit
+REG_SPHL          = 221    # setpoint upper limit
+REG_OULL          = 224    # output lower limit
+REG_OUHL          = 225    # output upper limit
+REG_SOFT_START    = 226    # soft-start time (s)
+# Ramp & Soak engine
+REG_RS_PRN_EXEC   = 247    # program being executed (0..20)  <-- program SELECT
+REG_RS_PRN_EDIT   = 248    # program to view/edit (0..20)
+REG_RS_SEG        = 249    # current segment (0..20)
+REG_RS_SEG_TIME   = 250    # elapsed time in current segment (s)
+REG_RS_TBASE      = 252    # 0 = seconds, 1 = minutes
+REG_RS_PROG_TYPE  = 254    # 0 = none, 1 = ramp-to-soak, 2 = R&S program
+# Tuning
+REG_TUNE_AUTO     = 257
+REG_TUNE_PB       = 258    # proportional band
+REG_TUNE_IR       = 259    # integral rate (rep/min)
+REG_TUNE_DT       = 260    # derivative time (s)
+REG_TUNE_CT       = 261    # PWM cycle (s)
+# Input
+REG_DPPO          = 279    # decimal point: 0=XXXX,1=XXX.X,2=XX.XX,3=X.XXX
+
+# Program table
+RS_PROG_BASE      = 400    # program 1 tolerance lives here
+RS_PROG_STRIDE    = 40     # each program block is 40 registers wide
+RS_SEGMENTS       = 9      # segments per program
+
+
+def program_base(n: int) -> int:
+    """First register (tolerance) of program n (1..20)."""
+    if not 1 <= n <= 20:
+        raise ValueError(f"program must be 1..20, got {n}")
+    return RS_PROG_BASE + (n - 1) * RS_PROG_STRIDE
+
+
+# Backwards-compat aliases (older code referenced these names)
+REG_COMMIT          = REG_OPEN_SESSION   # 53; note: this is OPEN_SESSION, not a commit
+REG_PROGRAM_EXEC    = REG_RS_PRN_EXEC    # 247 (was wrongly 214)
+REG_PROGRAM_TO_VIEW = REG_RS_PRN_EDIT    # 248 (was wrongly 213)
+REG_CURRENT_SEGMENT = REG_RS_SEG         # 249 (was wrongly 215)
 
 
 # ---------------------------------------------------------------------------

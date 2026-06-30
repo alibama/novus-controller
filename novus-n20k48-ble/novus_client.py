@@ -24,8 +24,12 @@ from bleak import BleakClient
 from novus_protocol import (
     FrameAssembler, build_read_registers, build_write_single,
     build_write_multiple, parse_read_response, to_signed,
-    REG_SETPOINT, REG_PV, REG_OUTPUT_PCT, REG_COMMIT,
-    REG_PROGRAM_EXEC, REG_CURRENT_SEGMENT, REG_USER_MANUAL_SP,
+    REG_SETPOINT, REG_PV, REG_OUTPUT_PCT,
+    REG_CTRL_AUTO, REG_CTRL_RUN,
+    REG_RS_PRN_EXEC, REG_RS_PRN_EDIT, REG_RS_SEG, REG_RS_SEG_TIME,
+    REG_RS_TBASE, REG_OPEN_SESSION, REG_DPPO, REG_UNIT,
+    REG_SPLL, REG_SPHL,
+    program_base, RS_SEGMENTS,
     FC_READ_REGISTERS, FC_WRITE_SINGLE, FC_WRITE_MULTIPLE,
 )
 
@@ -58,6 +62,7 @@ class ControllerState:
     pv: Optional[float]
     sp: Optional[float]
     output_pct: Optional[float] = None
+    running: bool = False           # CTRL_RUN (214): is the controller actually driving?
     active_program: Optional[int] = None
     active_segment: Optional[int] = None
     segment_time_left_s: Optional[float] = None
@@ -189,17 +194,26 @@ class NovusClient:
             return ControllerState(name=self.name, address=self.address,
                                    connected=False, pv=None, sp=None)
         try:
-            regs = await self.read_registers(REG_SETPOINT, 16)   # 200..215
+            # Read 200..214 covers SP/PV/output (200-202) and the run flag (214)
+            op = await self.read_registers(REG_SETPOINT, 15)       # 200..214
+            # Read 247..250 for program / segment / segment-time
+            rs = await self.read_registers(REG_RS_PRN_EXEC, 4)     # 247,248,249,250
         except Exception as e:
             print(f"[{self.name}] read_state failed: {e}")
             return ControllerState(name=self.name, address=self.address,
                                    connected=False, pv=None, sp=None)
 
-        sp_raw = regs[0]                  # 200
-        pv_raw = regs[1]                  # 201
-        out_raw = regs[2]                 # 202
-        active_program = regs[14]         # 214 (0 = stopped, 1..20 = running)
-        active_segment = regs[15]         # 215
+        sp_raw, pv_raw, out_raw = op[0], op[1], op[2]
+        run_flag  = op[REG_CTRL_RUN - REG_SETPOINT]   # reg 214: 1 = running
+        prog_exec = rs[0]          # 247: program selected (NOT cleared on stop)
+        cur_seg   = rs[2]          # 249: current segment
+        seg_time  = rs[3]          # 250: elapsed time in current segment (s)
+
+        is_running = bool(run_flag)
+        # A program is only "active" if the controller is actually running it.
+        # Register 247 just holds the last-selected program even when stopped,
+        # so trusting it alone falsely shows idle kilns as "running".
+        active_prog = prog_exec if (is_running and prog_exec > 0) else None
 
         return ControllerState(
             name=self.name,
@@ -208,45 +222,157 @@ class NovusClient:
             pv=round(self._scale(pv_raw), 1),
             sp=round(self._scale(sp_raw), 1),
             output_pct=round(out_raw / 10.0, 1),
-            active_program=active_program if active_program > 0 else None,
-            active_segment=active_segment if active_program > 0 else None,
-            segment_time_left_s=None,    # would need extra reads to compute
+            running=is_running,
+            active_program=active_prog,
+            active_segment=cur_seg if active_prog else None,
+            segment_time_left_s=None,   # see read_program() to compute remaining
         )
 
+    # ---- decimal point auto-detect ----------------------------------------
+
+    async def detect_scaling(self) -> int:
+        """Read INPUT_DPPO (279) and set self.decimal_places accordingly.
+        Returns the detected decimal-place count. Verify against the panel —
+        the protocol doc notes temperature PV may be ×10 regardless of DPPO."""
+        try:
+            dppo = (await self.read_registers(REG_DPPO, 1))[0]
+            if 0 <= dppo <= 3:
+                self.decimal_places = dppo
+        except Exception as e:
+            print(f"[{self.name}] detect_scaling failed: {e}")
+        return self.decimal_places
+
+    # ---- session / password ------------------------------------------------
+
+    async def open_session(self, password: int) -> None:
+        """Unlock config writes on a password-protected controller by writing
+        the password to OPEN_SESSION (reg 53). Call right after connect()."""
+        await self.write_register(REG_OPEN_SESSION, password)
+
+    # ---- program table read / write ---------------------------------------
+
+    async def read_program(self, num: int) -> Program:
+        """Read program `num` (1..20) from the controller's register table."""
+        base = program_base(num)
+        regs = await self.read_registers(base, 2 + 1 + RS_SEGMENTS * 3)  # tol,link,sp0 + 9*(t,e,sp)
+        tol_raw = regs[0]
+        link    = regs[1]
+        sp0_raw = regs[2]
+        segments: list[ProgramSegment] = []
+        for k in range(RS_SEGMENTS):
+            t = regs[3 + k * 3]          # time
+            e = regs[3 + k * 3 + 1]      # event
+            sp = regs[3 + k * 3 + 2]     # setpoint
+            # Trailing empty segments (time 0 and sp 0) are omitted
+            if t == 0 and sp == 0:
+                continue
+            segments.append(ProgramSegment(
+                setpoint=round(self._scale(sp), 1),
+                duration_minutes=t,
+                event=e,
+            ))
+        p = Program(
+            number=num,
+            name=f"Program {num:02d}",
+            tolerance=round(self._scale(tol_raw), 1),
+            segments=segments,
+            link_to=link,
+        )
+        # also remember the starting setpoint on the dataclass via attribute
+        p.start_setpoint = round(self._scale(sp0_raw), 1)  # type: ignore[attr-defined]
+        self._programs[num] = p
+        return p
+
+    async def write_program(self, num: int, segments: list[ProgramSegment],
+                            tolerance: float = 0.0, start_setpoint: float = 0.0,
+                            link_to: int = 0) -> None:
+        """
+        Write a full program (1..20). Up to 9 segments. Values are scaled by
+        decimal_places on the way out. Unused trailing segments are zeroed.
+
+        NOTE: on password-protected controllers, call open_session() first.
+        Writing the program table is a config change; the controller persists
+        R&S program registers as they are written (they are RW holding regs).
+        """
+        if len(segments) > RS_SEGMENTS:
+            raise ValueError(f"max {RS_SEGMENTS} segments, got {len(segments)}")
+
+        def unscale(v: float) -> int:
+            return int(round(v * (10 ** self.decimal_places)))
+
+        values: list[int] = [
+            unscale(tolerance),       # base+0 tolerance
+            int(link_to),             # base+1 link
+            unscale(start_setpoint),  # base+2 SP0
+        ]
+        for k in range(RS_SEGMENTS):
+            if k < len(segments):
+                seg = segments[k]
+                values += [int(seg.duration_minutes), int(seg.event),
+                           unscale(seg.setpoint)]
+            else:
+                values += [0, 0, 0]   # zero out unused segments
+
+        base = program_base(num)
+        # 30 registers; write in one multi-register write (well under the 123 limit)
+        await self.write_registers(base, values)
+
+    async def set_tolerance(self, num: int, tolerance: float) -> None:
+        """Set just the guaranteed-soak tolerance band for program `num`.
+        This is the single highest-leverage knob for firing repeatability:
+        the segment timer only advances while |PV - SP| <= tolerance."""
+        base = program_base(num)
+        await self.write_register(base, int(round(tolerance * (10 ** self.decimal_places))))
+
+    async def get_tolerance(self, num: int) -> float:
+        base = program_base(num)
+        raw = (await self.read_registers(base, 1))[0]
+        return round(self._scale(raw), 1)
+
     def list_programs(self) -> list[Program]:
-        """Return cached program metadata. Currently placeholder until we map
-        the program-table register layout from the trace; see protocol notes."""
-        if not self._programs:
-            for i in range(1, 21):
-                self._programs[i] = Program(number=i, name=f"Program {i:02d}")
-        return [self._programs[i] for i in range(1, 21)]
+        """Return cached programs. Call read_program(n) to populate from device.
+        Returns placeholders for any not yet read."""
+        out = []
+        for i in range(1, 21):
+            out.append(self._programs.get(i, Program(number=i, name=f"Program {i:02d}")))
+        return out
 
     def get_program(self, num: int) -> Optional[Program]:
-        if not self._programs:
-            self.list_programs()
         return self._programs.get(num)
 
     async def run_program(self, num: int) -> bool:
         """
         Start Ramp & Soak program `num` (1..20).
 
-        Verified: writing the program number to register 214 starts execution.
-        Writing 0 stops it.
+        Correct sequence (per official register map):
+          1. reg 247 (RS_PRN_EXEC) := num   → select WHICH program executes
+          2. reg 213 (CTRL_AUTO)   := 1     → automatic control mode
+          3. reg 214 (CTRL_RUN)    := 1     → start
+
+        The earlier bug ("runs whatever was last selected") came from writing
+        213/214 only — 213 is the auto/manual flag and 214 is just run/stop.
+        Neither selects the program; register 247 does.
         """
         if not 1 <= num <= 20:
             raise ValueError(f"program number must be 1..20, got {num}")
-        await self.write_register(REG_PROGRAM_EXEC, num)
+        await self.write_register(REG_RS_PRN_EXEC, num)
+        await asyncio.sleep(0.1)
+        await self.write_register(REG_CTRL_AUTO, 1)
+        await asyncio.sleep(0.1)
+        await self.write_register(REG_CTRL_RUN, 1)
         return True
 
     async def stop_program(self) -> bool:
-        """Stop any running program by writing 0 to reg 214."""
-        await self.write_register(REG_PROGRAM_EXEC, 0)
+        """Stop execution by clearing the run flag (reg 214 := 0)."""
+        await self.write_register(REG_CTRL_RUN, 0)
         return True
 
     async def is_running(self) -> int:
-        """Returns 0 if stopped, or the program number (1..20) currently executing."""
-        regs = await self.read_registers(REG_PROGRAM_EXEC, 1)
-        return regs[0]
+        """Return 0 if stopped, else the program number (1..20) being executed."""
+        run = (await self.read_registers(REG_CTRL_RUN, 1))[0]
+        if not run:
+            return 0
+        return (await self.read_registers(REG_RS_PRN_EXEC, 1))[0]
 
 
 # ---------------------------------------------------------------------------

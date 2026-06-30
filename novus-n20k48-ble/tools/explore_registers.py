@@ -7,8 +7,11 @@ and prints everything in human-friendly form. No writes — safe to run
 while the kiln is firing.
 
 Usage:
-    python explore_registers.py 00:26:A4:00:5F:4E
+    python explore_registers.py 00:26:A4:XX:XX:XX
 """
+
+import sys, pathlib
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 import asyncio
 import sys
 from novus_client import NovusClient

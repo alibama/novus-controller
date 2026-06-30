@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install test deps
+        # The tests stub bleak + notify, so we only need pytest here.
+        run: pip install pytest
+      - name: Byte-compile everything (syntax check)
+        run: python -m compileall -q novus_protocol.py novus_client.py monitor.py \
+             devices.py programs_library.py notify.py app_core.py kiln_dashboard.py
+      - name: Run tests
+        run: pytest tests/ -q

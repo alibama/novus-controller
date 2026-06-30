@@ -5,7 +5,7 @@ Connect to a BLE device and dump its GATT tree (services, characteristics,
 descriptors, and the values of anything readable).
 
 Usage:
-    python gatt_enumerate.py 00:26:A4:00:5F:4E
+    python gatt_enumerate.py 00:26:A4:XX:XX:XX
 
 Run from inside your venv:
     ~/kiln-bt-scanner/.venv/bin/python gatt_enumerate.py <ADDRESS>
@@ -99,7 +99,7 @@ async def enumerate_device(address: str) -> None:
 def main() -> None:
     if len(sys.argv) != 2:
         print("Usage: python gatt_enumerate.py <BT_ADDRESS>")
-        print("Example: python gatt_enumerate.py 00:26:A4:00:5F:4E")
+        print("Example: python gatt_enumerate.py 00:26:A4:XX:XX:XX")
         sys.exit(1)
 
     address = sys.argv[1]
