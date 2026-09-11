@@ -35,6 +35,14 @@ All notable changes to this project are documented here. This project follows
   target on demand.
 - Plausibility floor now scales to each controller's hold temperature.
 
+### Added (updates)
+- `deploy/update.sh`: one-command update that installs changed deps,
+  byte-compiles and runs the test suite as a safety gate, and only then
+  restarts the systemd services it finds — logging everything to
+  `deploy/logs/` and health-checking each service (with optional rollback). A
+  broken pull never restarts a service. Fixed a latent ordering bug the gate
+  caught (`from __future__` after a path shim in `tools/kiln_logger.py`).
+
 ### Added (open-data API)
 - `api.py`: an optional read-only FastAPI service publishing per-firing energy
   and cost (`/firings`, `/firings.csv`), rollups (`/summary`), and per-device

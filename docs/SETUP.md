@@ -252,3 +252,40 @@ logging resumes. No keyboard, no login.
   - live logs: `journalctl -u kiln-dashboard -f`
   - restart: `sudo systemctl restart kiln-dashboard`
   - stop (to free BLE): `sudo systemctl stop kiln-dashboard`
+
+
+## Updating
+
+Pull the latest code and run the update script — it validates the new code
+**before** restarting anything, so a broken pull can't take the watchdog down:
+
+```bash
+git pull
+bash deploy/update.sh
+```
+
+What it does: installs dependencies only if `requirements*.txt` changed,
+byte-compiles and runs the test suite as a safety gate, and only then restarts
+the systemd services that exist (`kiln-dashboard`, and `kiln-api` /
+`kiln-analysis` if installed). It health-checks each service and, on failure,
+dumps the journal so you can see why. Everything is logged to
+`deploy/logs/update-<timestamp>.log` (with `latest.log` pointing at the newest,
+keeping the last 30).
+
+Useful flags:
+- `--pull` — do the `git pull --ff-only` for you.
+- `--api` — also install `requirements-api.txt` (the open-data API).
+- `--force-deps` — reinstall dependencies even if unchanged.
+- `--rollback-on-failure` — if a service won't come back, checkout the previous
+  commit and restart.
+
+Override the service list with `KILN_SERVICES="my-dash my-api" bash deploy/update.sh`.
+
+Your local config (`devices.json`, `notify.env`, `kiln_config.py`,
+`watchdog_settings.json`, `studio_settings.json`, `logs/`) is gitignored, so
+updates never disturb your device list, thresholds, or history. Restarting the
+dashboard briefly pauses the software watchdog (a few seconds) — the
+controllers keep running their programs; avoid updating mid-recovery.
+
+For the test gate to run, install the dev deps into the venv once:
+`.venv/bin/pip install pytest fastapi httpx`.

@@ -110,8 +110,7 @@ and set each one's role (furnace or kiln). Or copy `kiln_config.example.py` to
 > same controller — the bridge allows only one client at a time. The app polls
 > intermittently and has a "Release BLE for QuickTune" button.
 
-For a hardened always-on deployment (systemd units, notifications, remote
-access), see [`docs/SETUP.md`](docs/SETUP.md).
+Update a running install with `git pull && bash deploy/update.sh` — it validates (compile + tests) before restarting, logs to `deploy/logs/`, and won't restart on a broken pull. For a hardened always-on deployment (systemd units, notifications, remote access), see [`docs/SETUP.md`](docs/SETUP.md).
 
 ---
 
