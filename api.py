@@ -94,9 +94,11 @@ def index():
         "data_dictionary": usage_mod.DATA_DICTIONARY,
         "endpoints": {
             "/firings": "per-firing energy & cost (JSON). "
-                        "filters: controller, since, limit",
-            "/firings.csv": "same data as CSV",
-            "/summary": "totals and rollups by controller and month",
+                        "filters: controller, since, until, limit",
+            "/firings.csv": "same data as CSV (same filters)",
+            "/summary": "totals and rollups by controller and month. "
+                        "filters: since, until (date or ISO; until is "
+                        "inclusive of the whole day)",
             "/devices": "per-device aggregates (no addresses)",
             "/health": "liveness check",
             "/docs": "interactive OpenAPI docs",
@@ -109,32 +111,43 @@ def health():
     return {"ok": True}
 
 
-def _filter(rows, controller, since):
+def _filter(rows, controller=None, since=None, until=None):
+    """Filter firing rows by controller and an inclusive [since, until] date/time
+    range. `since`/`until` accept a date (YYYY-MM-DD) or a full ISO timestamp;
+    a bare `until` date includes the whole day. Comparisons are lexicographic on
+    the ISO start time, which is correct for ISO 8601."""
     if controller:
         rows = [r for r in rows if r["controller"] == controller]
     if since:
         rows = [r for r in rows if (r.get("start_utc") or "") >= since]
+    if until:
+        upper = until if len(until) > 10 else until + "T23:59:59+00:00"
+        rows = [r for r in rows if (r.get("start_utc") or "") <= upper]
     return rows
 
 
 @app.get("/firings")
 def firings(controller: str | None = Query(None),
-            since: str | None = Query(None, description="UTC ISO lower bound"),
+            since: str | None = Query(None, description="lower bound, date or ISO"),
+            until: str | None = Query(None, description="upper bound, date or ISO"),
             limit: int = Query(1000, ge=1, le=10000)):
-    rows = _filter(_all_rows(), controller, since)[:limit]
-    return {"count": len(rows), "license": LICENSE, "firings": rows}
+    rows = _filter(_all_rows(), controller, since, until)[:limit]
+    return {"count": len(rows), "since": since, "until": until,
+            "license": LICENSE, "firings": rows}
 
 
 @app.get("/firings.csv", response_class=PlainTextResponse)
 def firings_csv(controller: str | None = Query(None),
-                since: str | None = Query(None)):
-    rows = _filter(_all_rows(), controller, since)
+                since: str | None = Query(None),
+                until: str | None = Query(None)):
+    rows = _filter(_all_rows(), controller, since, until)
     return usage_mod.to_csv(rows)
 
 
 @app.get("/summary")
-def summary():
-    rows = _all_rows()
+def summary(since: str | None = Query(None, description="lower bound, date or ISO"),
+            until: str | None = Query(None, description="upper bound, date or ISO")):
+    rows = _filter(_all_rows(), None, since, until)
     def _sum(rs, k):
         return round(sum((r.get(k) or 0) for r in rs), 2)
     by_ctrl = {}
@@ -143,13 +156,34 @@ def summary():
         by_ctrl.setdefault(r["controller"], []).append(r)
         by_month.setdefault((r.get("date_utc") or "")[:7], []).append(r)
     ss = _studio()
+    firings = len(rows)
+    energy_kwh = _sum(rows, "energy_kwh")
+    cost = _sum(rows, "cost")
+    dates = [r.get("date_utc") for r in rows if r.get("date_utc")]
+    first = min(dates, default=None)
+    last = max(dates, default=None)
+    from datetime import datetime, timezone
     return {
+        "schema": "novus-kiln-usage-summary/1",
         "license": LICENSE,
         "studio": ss.get("studio", ""),
         "currency": ss.get("currency", "USD"),
-        "totals": {"firings": len(rows),
-                   "energy_kwh": _sum(rows, "energy_kwh"),
-                   "cost": _sum(rows, "cost")},
+        "updated_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        # requested window (null when unfiltered), echoed back for clarity
+        "range": {"since": since, "until": until},
+        # --- top-level keys for the Glass Database data contract (+ aliases) ---
+        "firings": firings,
+        "count": firings,
+        "energy_kwh": energy_kwh,
+        "kwh": energy_kwh,
+        "cost_usd": cost,
+        "cost": cost,
+        "since": first,          # earliest firing date in the returned set
+        "start": first,
+        "until": last,           # latest firing date in the returned set
+        "end": last,
+        # --- richer detail, preserved ---
+        "totals": {"firings": firings, "energy_kwh": energy_kwh, "cost": cost},
         "by_controller": {c: {"firings": len(rs),
                               "energy_kwh": _sum(rs, "energy_kwh"),
                               "cost": _sum(rs, "cost")}
