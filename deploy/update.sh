@@ -39,6 +39,10 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || { echo "cannot cd to repo root"; exit 1; }
 
+# Optional persistent config, e.g. a line:  KILN_SERVICES="my-dash my-api"
+# so you don't have to pass it each time.
+[ -f "$ROOT/deploy/update.conf" ] && . "$ROOT/deploy/update.conf"
+
 LOGDIR="$ROOT/deploy/logs"
 mkdir -p "$LOGDIR"
 TS="$(date +%Y%m%d-%H%M%S)"
@@ -106,7 +110,7 @@ CUR_HASH="$(cat requirements.txt requirements-api.txt 2>/dev/null | sha256sum | 
 if [ "$FORCE_DEPS" = 1 ] || [ "$(cat "$REQ_HASH_FILE" 2>/dev/null || true)" != "$CUR_HASH" ]; then
   log "installing dependencies (requirements changed)…"
   "$PIP" install -q -r requirements.txt || fail "pip install requirements.txt failed"
-  if [ "$WITH_API" = 1 ] || systemctl list-unit-files 2>/dev/null | grep -q '^kiln-api'; then
+  if [ "$WITH_API" = 1 ] || systemctl cat kiln-api >/dev/null 2>&1; then
     if [ -f requirements-api.txt ]; then
       "$PIP" install -q -r requirements-api.txt || fail "pip install requirements-api.txt failed"
     fi
@@ -114,6 +118,13 @@ if [ "$FORCE_DEPS" = 1 ] || [ "$(cat "$REQ_HASH_FILE" 2>/dev/null || true)" != "
   echo "$CUR_HASH" > "$REQ_HASH_FILE"
 else
   log "dependencies unchanged — skipping (use --force-deps to reinstall)"
+fi
+
+# guard: a dependency install can pull in conflicting versions — surface it
+if ! "$PY" -m pip check >/dev/null 2>&1; then
+  log "WARNING: 'pip check' reports dependency conflicts in the venv:"
+  "$PY" -m pip check 2>&1 | sed 's/^/      /'
+  log "  (the app may fail to start — consider pinning versions in requirements.txt)"
 fi
 
 # ---- 3. VALIDATE before touching services ------------------------------------
@@ -136,7 +147,7 @@ fi
 CANDIDATES="${KILN_SERVICES:-kiln-dashboard kiln-api kiln-analysis}"
 RESTARTED=()
 for svc in $CANDIDATES; do
-  if systemctl list-unit-files 2>/dev/null | grep -q "^${svc}\.service"; then
+  if systemctl cat "$svc" >/dev/null 2>&1; then
     log "restarting ${svc}…"
     if sudo systemctl restart "$svc"; then
       RESTARTED+=("$svc")
@@ -145,11 +156,44 @@ for svc in $CANDIDATES; do
     fi
   fi
 done
+
+# If none of the known names matched, DISCOVER the unit that actually runs this
+# app — any service whose ExecStart references kiln_dashboard.py, uvicorn api,
+# or this repo directory.
 if [ "${#RESTARTED[@]}" -eq 0 ]; then
-  log "No known systemd services found to restart."
-  log "If you run the app by hand, restart it now, e.g.:"
-  log "    $VENV/bin/streamlit run kiln_dashboard.py"
-  log "=== Update finished (code updated; no services managed). Log: $LOG ==="
+  log "no known service names matched — searching systemd for the app's unit…"
+  while read -r unit; do
+    [ -z "$unit" ] && continue
+    es="$(systemctl show -p ExecStart --value "$unit" 2>/dev/null || true)"
+    if printf '%s' "$es" | grep -qiE "kiln_dashboard\.py|uvicorn +api:app|${ROOT}"; then
+      log "discovered service: ${unit} — restarting…"
+      if sudo systemctl restart "$unit"; then
+        RESTARTED+=("${unit%.service}")
+      fi
+    fi
+  done < <(systemctl list-units --type=service --all --no-legend 2>/dev/null | awk '{print $1}')
+  if [ "${#RESTARTED[@]}" -gt 0 ]; then
+    log "TIP: set KILN_SERVICES=\"${RESTARTED[*]}\" (or in deploy/update.conf) to "
+    log "     skip discovery next time."
+  fi
+fi
+
+if [ "${#RESTARTED[@]}" -eq 0 ]; then
+  # Nothing was restarted. Be honest about whether the app is up on OLD code or
+  # down entirely — never report a bland success.
+  if pgrep -af "streamlit run|uvicorn +api:app" >/dev/null 2>&1; then
+    log "!! The app is RUNNING but under no unit I could restart, so it is still"
+    log "!! on the OLD code. Restart it yourself so this update takes effect:"
+    log "     sudo systemctl restart <your-service-name>   # then set KILN_SERVICES"
+    log "   or, if you run it by hand, stop it and relaunch:"
+    log "     $VENV/bin/streamlit run kiln_dashboard.py --server.port 8501 --server.address 127.0.0.1"
+  else
+    log "!! The app does NOT appear to be running. Start it now:"
+    log "     $VENV/bin/streamlit run kiln_dashboard.py --server.port 8501 --server.address 127.0.0.1"
+    log "   (or install and enable deploy/kiln-dashboard.service for a managed service.)"
+  fi
+  log "=== Update finished: code is updated & validated, but NO service was "
+  log "    restarted (see above). Log: $LOG ==="
   exit 0
 fi
 

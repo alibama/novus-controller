@@ -17,7 +17,7 @@ from streamlit_autorefresh import st_autorefresh
 import app_core as core
 from devices import ROLE_FURNACE
 
-st.set_page_config(page_title="Crozet Glass Kilns", page_icon="🔥", layout="wide")
+st.set_page_config(page_title="Raging Buffalo Glass Studio Kilns", page_icon="🔥", layout="wide")
 
 if not core.require_password():
     st.stop()
@@ -25,7 +25,7 @@ if not core.require_password():
 bridge, clients, monitor, devices, runtime = core.boot()
 core.init_history(devices)
 
-st.markdown("# 🔥 Crozet Glass")
+st.markdown("# 🔥 Raging Buffalo Glass Studio")
 
 # --- Released state --------------------------------------------------------
 if runtime["ble_released"]:

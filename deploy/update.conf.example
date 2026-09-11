@@ -1,0 +1,5 @@
+# Copy to deploy/update.conf to pin settings for deploy/update.sh.
+# Space-separated systemd service names this app runs under:
+KILN_SERVICES="kiln-dashboard"
+# add kiln-api if you run the open-data API as a service, e.g.:
+# KILN_SERVICES="kiln-dashboard kiln-api"

@@ -9,7 +9,7 @@
 # username or directory differ from the defaults below.
 
 [Unit]
-Description=Crozet Glass kiln dashboard (Streamlit + BLE, with logging)
+Description=Raging Buffalo Glass Studio kiln dashboard (Streamlit + BLE, with logging)
 After=network-online.target bluetooth.service
 Wants=network-online.target
 Requires=bluetooth.service

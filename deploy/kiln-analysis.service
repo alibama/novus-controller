@@ -10,7 +10,7 @@
 # by hand whenever you want to look at performance data.
 
 [Unit]
-Description=Crozet Glass kiln analysis (read-only, CSV logs)
+Description=Raging Buffalo Glass Studio kiln analysis (read-only, CSV logs)
 After=network-online.target
 Wants=network-online.target
 
