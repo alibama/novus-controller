@@ -1,0 +1,18 @@
+# Read-only open-data API (energy + cost + per-device aggregates, CC-BY).
+# Serves NO Bluetooth addresses or secrets. Install:
+#   pip install -r requirements-api.txt
+#   sudo cp deploy/kiln-api.service /etc/systemd/system/
+#   sudo systemctl enable --now kiln-api
+[Unit]
+Description=Kiln open-data API (read-only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=youruser
+WorkingDirectory=/home/youruser/novus-n20k48-ble
+ExecStart=/home/youruser/novus-n20k48-ble/.venv/bin/uvicorn api:app --host 0.0.0.0 --port 8000
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

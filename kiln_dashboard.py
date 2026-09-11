@@ -182,6 +182,17 @@ with st.container(border=True):
                 "× rated kW — calibrate each controller's kW in Settings for the "
                 "truest cost. Set your studio name and electricity rate in "
                 "Settings too.")
+        with st.expander("Machine-readable open API"):
+            st.markdown(
+                "There's also a read-only HTTP API (CC-BY, CORS-open, no device "
+                "addresses) for programmatic access — `/firings`, `/summary`, "
+                "`/devices`, `/firings.csv`. Run it alongside the dashboard:\n"
+                "```\n"
+                "pip install -r requirements-api.txt\n"
+                "uvicorn api:app --host 0.0.0.0 --port 8000\n"
+                "```\n"
+                "See `docs/API.md`. Expose it read-only via your reverse proxy "
+                "or a Tailscale Funnel on a separate port.")
     else:
         st.info("No completed firings logged yet — run a program and the harvest "
                 "fills in. Set your studio name, electricity rate, and each "

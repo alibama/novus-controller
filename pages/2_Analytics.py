@@ -48,9 +48,14 @@ def load_series(name: str, since: date, until: date) -> pd.DataFrame:
 
 
 def compute_ramp_rate(df: pd.DataFrame, smooth_window: int = 12) -> pd.DataFrame:
+    df = df.copy()
+    # Always define the columns so downstream charts never KeyError — even when
+    # a controller has only blank/disconnected rows logged so far (e.g. a newly
+    # added device that hasn't produced a real reading yet).
+    df["pv_smooth"] = float("nan")
+    df["ramp_rate_per_min"] = float("nan")
     if df.empty or df["pv"].isna().all():
         return df
-    df = df.copy()
     df["pv_smooth"] = df["pv"].rolling(smooth_window, min_periods=2, center=True).mean()
     dt_min = df["timestamp_utc"].diff().dt.total_seconds() / 60.0
     df["ramp_rate_per_min"] = df["pv_smooth"].diff() / dt_min

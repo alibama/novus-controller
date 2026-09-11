@@ -35,6 +35,17 @@ All notable changes to this project are documented here. This project follows
   target on demand.
 - Plausibility floor now scales to each controller's hold temperature.
 
+### Added (open-data API)
+- `api.py`: an optional read-only FastAPI service publishing per-firing energy
+  and cost (`/firings`, `/firings.csv`), rollups (`/summary`), and per-device
+  aggregates (`/devices`). CORS-open, CC-BY-4.0, and public-safe — it never
+  serves Bluetooth addresses or secrets. `requirements-api.txt` +
+  `deploy/kiln-api.service` + `docs/API.md`.
+
+### Fixed
+- Analytics no longer KeyErrors on a controller whose logged PV is all blank
+  (e.g. a newly added device) — the ramp-rate columns are always created.
+
 ### Added (open data + energy)
 - `usage.py` + `runs.py`: estimate per-firing energy (kWh) and cost from the
   output-power integral and each controller's rated kW, excluding log gaps.

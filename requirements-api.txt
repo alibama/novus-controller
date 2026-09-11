@@ -1,0 +1,4 @@
+# Optional: only needed to run the read-only open-data API (api.py).
+# The dashboard itself does not require these.
+fastapi>=0.110
+uvicorn[standard]>=0.29
