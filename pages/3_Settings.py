@@ -34,10 +34,13 @@ NOVUS_OUI = "00:26:A4"   # Novus controllers; also advertise mfg id 511
 # ===========================================================================
 st.header("1 · Find controllers")
 st.caption("Scanning needs the Bluetooth radio, so this pauses monitoring "
-           "for a few seconds, then resumes.")
+           "for a few seconds, then resumes. A controller that's currently "
+           "connected — to this app or to QuickTune on a phone — won't appear "
+           "in a scan, because it stops advertising while connected.")
 
-
-if st.button("🔍 Scan for 8 seconds", type="primary",
+sc_secs = st.slider("Scan seconds", 5, 30, 8, key="scan_secs",
+                    help="Longer scans catch controllers that advertise slowly.")
+if st.button(f"🔍 Scan for {sc_secs} seconds", type="primary",
              disabled=st.session_state.get("scanning", False)):
     st.session_state["scanning"] = True
     with st.spinner("Pausing monitor and scanning…"):
@@ -45,7 +48,8 @@ if st.button("🔍 Scan for 8 seconds", type="primary",
         try:
             # scan_now serializes on the poll lock, frees the radio, always
             # stops discovery, and retries through BlueZ "in progress" states.
-            results = bridge.call(monitor.scan_now(8.0, NOVUS_OUI), timeout=45)
+            results = bridge.call(monitor.scan_now(float(sc_secs), NOVUS_OUI),
+                                  timeout=float(sc_secs) + 40)
             st.session_state["scan_results"] = results
         except Exception as e:
             msg = str(e)
@@ -61,7 +65,23 @@ if st.button("🔍 Scan for 8 seconds", type="primary",
             st.session_state["scanning"] = False
 
 results = st.session_state.get("scan_results")
-if results:
+if results is not None and not results:
+    st.warning(
+        "Scan finished but found **no devices**. Things to check:\n"
+        "- A controller that's **connected** (to this app or QuickTune) won't "
+        "show — disconnect QuickTune and make sure the monitor released the "
+        "radio, then rescan.\n"
+        "- The Bluetooth adapter may be off or blocked — on the host: "
+        "`rfkill unblock bluetooth` and `bluetoothctl show` (look for "
+        "*Powered: yes*).\n"
+        "- Under a service user, discovery needs permission — the user should "
+        "be in the `bluetooth` group, or verify manually with "
+        "`bluetoothctl scan on`.\n"
+        "- Try a longer scan (slider above) and move a controller within a few "
+        "metres.\n\n"
+        "You don't have to wait on the scanner — add controllers by address "
+        "under **Devices & roles → Add a controller by address** below.")
+elif results:
     known = {d.address.upper() for d in devices}
     st.write(f"Found {len(results)} device(s). Novus controllers listed first.")
     for r in results:
@@ -109,11 +129,18 @@ else:
             new_dbl = c4.checkbox(
                 "Can double as furnace", value=d.can_be_furnace, key=f"db_{i}",
                 help="Allow temporarily treating this kiln as a furnace for tests.")
-            c4.caption(f"`{d.address}`")
+            new_addr = st.text_input(
+                "BLE address", value=d.address, key=f"ad_{i}",
+                help="Swapped this controller? Paste the new MAC here — the name "
+                     "and all its settings (thresholds, rated kW) stay put, since "
+                     "everything is keyed by name, not address.")
             if (new_name != d.name or new_role != d.role
-                    or new_sp != d.expected_setpoint or new_dbl != d.can_be_furnace):
-                devs[i] = Device(name=new_name, address=d.address, role=new_role,
-                                 can_be_furnace=new_dbl, expected_setpoint=new_sp)
+                    or new_sp != d.expected_setpoint or new_dbl != d.can_be_furnace
+                    or new_addr.strip().upper() != d.address.upper()):
+                devs[i] = Device(name=new_name, address=new_addr.strip().upper(),
+                                 role=new_role, can_be_furnace=new_dbl,
+                                 expected_setpoint=new_sp,
+                                 power_kw=getattr(d, "power_kw", 0.0))
                 changed = True
             if st.button("🗑 Remove", key=f"rm_{i}"):
                 devs.pop(i)
@@ -125,6 +152,34 @@ else:
             save_devices(devs)
             st.success("Saved. Restart the service to apply: "
                        "`sudo systemctl restart kiln-dashboard`")
+
+with st.expander("➕ Add a controller by address (no scan needed)"):
+    st.caption("If the scanner won't cooperate, add controllers by hand. Get "
+               "each MAC from QuickTune Mobile's device list (or the label on "
+               "the module). Format like `00:26:A4:xx:xx:xx`.")
+    a1, a2, a3 = st.columns([2, 3, 2])
+    m_name = a1.text_input("Name", key="madd_name")
+    m_addr = a2.text_input("BLE address", key="madd_addr")
+    m_role = a3.selectbox("Role", [ROLE_KILN, ROLE_FURNACE], key="madd_role")
+    if st.button("Add controller", key="madd_go"):
+        import re as _re
+        addr = m_addr.strip().upper()
+        ok_mac = bool(_re.fullmatch(r"([0-9A-F]{2}:){5}[0-9A-F]{2}", addr))
+        devs2 = load_devices()
+        if not m_name.strip() or not ok_mac:
+            st.error("Enter a name and a valid BLE address "
+                     "(six hex pairs, e.g. 00:26:A4:1A:2B:3C).")
+        elif any(x.address.upper() == addr for x in devs2):
+            st.warning("That address is already in your list.")
+        else:
+            devs2.append(Device(
+                name=m_name.strip(), address=addr, role=m_role,
+                can_be_furnace=(m_role == ROLE_KILN),
+                expected_setpoint=(2100.0 if m_role == ROLE_FURNACE else 896.0)))
+            save_devices(devs2)
+            st.success(f"Added {m_name.strip()} ({addr}). Restart the service to "
+                       "start monitoring it: `sudo systemctl restart kiln-dashboard`")
+            st.rerun()
 
 st.divider()
 
