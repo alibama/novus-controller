@@ -37,32 +37,28 @@ st.caption("Scanning needs the Bluetooth radio, so this pauses monitoring "
            "for a few seconds, then resumes.")
 
 
-async def _scan(seconds: float = 8.0):
-    from bleak import BleakScanner
-    found = await BleakScanner.discover(timeout=seconds, return_adv=True)
-    out = []
-    for addr, (dev, adv) in found.items():
-        is_novus = (str(addr).upper().startswith(NOVUS_OUI)
-                    or 511 in (adv.manufacturer_data or {}))
-        out.append({
-            "address": str(addr).upper(),
-            "name_adv": (adv.local_name or getattr(dev, "name", "") or ""),
-            "rssi": adv.rssi,
-            "novus": is_novus,
-        })
-    out.sort(key=lambda r: (not r["novus"], -(r["rssi"] or -999)))
-    return out
-
-if st.button("🔍 Scan for 8 seconds", type="primary"):
+if st.button("🔍 Scan for 8 seconds", type="primary",
+             disabled=st.session_state.get("scanning", False)):
+    st.session_state["scanning"] = True
     with st.spinner("Pausing monitor and scanning…"):
         core.release_ble(bridge, clients, monitor)
         try:
-            results = bridge.call(_scan(8.0), timeout=20)
+            # scan_now serializes on the poll lock, frees the radio, always
+            # stops discovery, and retries through BlueZ "in progress" states.
+            results = bridge.call(monitor.scan_now(8.0, NOVUS_OUI), timeout=45)
             st.session_state["scan_results"] = results
         except Exception as e:
-            st.error(f"scan failed: {e}")
+            msg = str(e)
+            if "in progress" in msg.lower() or "inprogress" in msg.lower():
+                st.error("Bluetooth is still finishing a previous scan. Wait a "
+                         "few seconds and try again. If it persists, the adapter "
+                         "is stuck — restart the Bluetooth service "
+                         "(`sudo systemctl restart bluetooth`) or the app.")
+            else:
+                st.error(f"scan failed: {e}")
         finally:
             core.reclaim_ble(bridge, clients, monitor)
+            st.session_state["scanning"] = False
 
 results = st.session_state.get("scan_results")
 if results:

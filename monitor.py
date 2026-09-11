@@ -188,6 +188,78 @@ class Monitor:
         self._started = True
         self._task = asyncio.run_coroutine_threadsafe(self._run(), loop)
 
+    async def scan_now(self, seconds: float = 8.0, novus_oui: str = "00:26:A4"):
+        """Discover nearby BLE devices RIGHT NOW, safely.
+
+        BlueZ allows only one discovery at a time per adapter. This serializes
+        the scan against the poll loop (so a poll/connect can't overlap it and a
+        second scan can't start mid-flight), frees the radio first, and ALWAYS
+        stops discovery in a finally — even if the caller's timeout cancels us —
+        so a scan can never leave the adapter stuck 'in progress' for the next
+        one. If discovery is already running (a prior scan clearing up, or
+        another app/tab), it backs off and retries instead of failing.
+        Returns a list of {address, name_adv, rssi, novus}.
+        """
+        from bleak import BleakScanner
+        try:
+            from bleak.exc import BleakError
+        except Exception:                       # pragma: no cover
+            BleakError = Exception
+
+        async with self._poll_lock:
+            # free the radio so discovery isn't blocked by a held connection
+            for c in list(self.clients.values()):
+                try:
+                    if getattr(c, "connected", False):
+                        await c.disconnect()
+                except Exception:
+                    pass
+
+            last_err = None
+            for attempt in range(3):
+                scanner = BleakScanner()
+                try:
+                    await scanner.start()
+                    await asyncio.sleep(seconds)
+                    try:
+                        found = scanner.discovered_devices_and_advertisement_data
+                        items = found.items()
+                    except AttributeError:      # very old bleak
+                        found = await BleakScanner.discover(timeout=0.1,
+                                                            return_adv=True)
+                        items = found.items()
+                    return self._format_scan(items, novus_oui)
+                except BleakError as e:
+                    last_err = e
+                    if "inprogress" in str(e).lower() or "in progress" in str(e).lower():
+                        # another discovery is active — let it clear, then retry
+                        await asyncio.sleep(2.0 + attempt)
+                        continue
+                    raise
+                finally:
+                    try:
+                        await scanner.stop()
+                    except Exception:
+                        pass
+            raise last_err or RuntimeError("scan failed")
+
+    @staticmethod
+    def _format_scan(items, novus_oui: str):
+        out = []
+        for addr, (dev, adv) in items:
+            mfg = getattr(adv, "manufacturer_data", None) or {}
+            is_novus = (str(addr).upper().startswith(novus_oui.upper())
+                        or 511 in mfg)
+            out.append({
+                "address": str(addr).upper(),
+                "name_adv": (getattr(adv, "local_name", None)
+                             or getattr(dev, "name", "") or ""),
+                "rssi": getattr(adv, "rssi", None),
+                "novus": is_novus,
+            })
+        out.sort(key=lambda r: (not r["novus"], -(r["rssi"] or -999)))
+        return out
+
     async def control(self, name: str, action, *args):
         """Run a control command on one controller RIGHT NOW, reliably.
 
