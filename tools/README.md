@@ -12,6 +12,8 @@ and they're handy for poking at a new controller safely (reading first!).
 | `novus_n20k48_read.py` | Read a block of registers from one controller. |
 | `explore_registers.py` | Read-only sweep of the documented registers via `NovusClient`. |
 | `kiln_logger.py`     | Legacy headless CSV logger (superseded by `monitor.py`). |
+| `snapshot_config.py` | Capture a full, verified config snapshot (JSON + human-readable) for backup/audit. |
+| `export_usage.py`    | Export per-firing energy/cost as CSV + glass-database-ready XLSX (cron-friendly). |
 
 Usage example:
 

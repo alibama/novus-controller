@@ -31,6 +31,8 @@ class Device:
     role: str = ROLE_KILN          # "furnace" or "kiln"
     can_be_furnace: bool = False   # kiln/annealer that may double as a furnace
     expected_setpoint: float = 2100.0  # used by the watchdog when role==furnace
+    power_kw: float = 0.0           # rated element power at 100% output (kW);
+                                    # used to estimate energy/cost. 0 = unknown.
 
     @property
     def is_furnace(self) -> bool:

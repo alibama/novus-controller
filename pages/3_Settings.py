@@ -203,6 +203,155 @@ else:
                     st.caption("Note: the password must be numeric for the Novus session register.")
 
 st.divider()
+st.header("3b · Build or edit a custom program")
+st.caption("Type any ramp/soak program and write it to any slot. Each row is a "
+           "segment: how many minutes to reach a target and hold there. Use "
+           "0 (or 1) minutes for an as-fast-as-possible jump. Load a template "
+           "or the controller's current slot as a starting point, then edit. "
+           "Max 9 segments per program (the controller's limit).")
+
+if not names:
+    st.info("Add a device first.")
+else:
+    import pandas as pd
+    ss = st.session_state
+    ss.setdefault("pe_start", 70.0)
+    ss.setdefault("pe_tol", 0.0)
+    ss.setdefault("pe_link", 0)
+    ss.setdefault("pe_nonce", 0)
+    ss.setdefault("pe_df", pd.DataFrame(
+        [{"minutes": 60, "target °F": 1000, "event": 0}]))
+
+    e1, e2 = st.columns([2, 1])
+    pe_ctrl = e1.selectbox("Controller", names, key="pe_ctrl")
+    pe_slot = e2.number_input("Slot", min_value=1, max_value=20, value=1, key="pe_slot")
+
+    # prefill options
+    l1, l2, l3 = st.columns([3, 1, 1])
+    pe_tmpl = l1.selectbox("Template to load", list(LIBRARY.keys()),
+                           format_func=lambda k: LIBRARY[k].name, key="pe_tmpl")
+    if l2.button("Load template", use_container_width=True):
+        sp = LIBRARY[pe_tmpl]
+        ss.pe_start = float(sp.start_setpoint)
+        ss.pe_tol = float(sp.tolerance)
+        ss.pe_link = 0
+        ss.pe_df = pd.DataFrame([{"minutes": s.minutes, "target °F": s.setpoint,
+                                  "event": s.event} for s in sp.segments])
+        ss.pe_nonce += 1
+        st.rerun()
+    if l3.button("Load current", use_container_width=True,
+                 help="Read whatever is in this slot on the controller now."):
+        with st.spinner("Reading the slot from the controller…"):
+            try:
+                prog = bridge.call(monitor.read_program_now(pe_ctrl, int(pe_slot)),
+                                   timeout=60)
+                ss.pe_start = float(getattr(prog, "start_setpoint", 0.0))
+                ss.pe_tol = float(prog.tolerance)
+                ss.pe_link = int(prog.link_to)
+                ss.pe_df = pd.DataFrame(
+                    [{"minutes": s.duration_minutes, "target °F": s.setpoint,
+                      "event": s.event} for s in prog.segments]
+                    or [{"minutes": 0, "target °F": 0, "event": 0}])
+                ss.pe_nonce += 1
+                st.success(f"Loaded slot {int(pe_slot)} from {pe_ctrl}.")
+                st.rerun()
+            except Exception as ex:
+                st.error(f"couldn't read the slot: {ex}")
+
+    # program-level params
+    q1, q2, q3 = st.columns(3)
+    pe_start = q1.number_input("Start setpoint °F", value=float(ss.pe_start),
+                               min_value=0.0, max_value=2400.0, step=5.0,
+                               key="pe_start")
+    pe_tol = q2.number_input("Tolerance ± ° (0 = off)", value=float(ss.pe_tol),
+                             min_value=0.0, max_value=200.0, step=1.0, key="pe_tol",
+                             help="Guaranteed soak: the timer pauses until PV is "
+                                  "within this band of the target. 0 disables it.")
+    pe_link = q3.number_input("Link to program # (0 = none)", value=int(ss.pe_link),
+                              min_value=0, max_value=20, step=1, key="pe_link",
+                              help="Chain to another program when this one ends.")
+
+    # the editable segment table
+    edited = st.data_editor(
+        ss.pe_df, num_rows="dynamic", use_container_width=True,
+        key=f"pe_editor_{ss.pe_nonce}",
+        column_config={
+            "minutes": st.column_config.NumberColumn(
+                "minutes", min_value=0, max_value=9999, step=1,
+                help="Time to reach & hold this target. 0–1 = as fast as possible."),
+            "target °F": st.column_config.NumberColumn(
+                "target °F", min_value=0, max_value=2400, step=5),
+            "event": st.column_config.NumberColumn(
+                "event", min_value=0, max_value=255, step=1,
+                help="Digital event/output flags. Leave 0 unless you use them."),
+        })
+
+    # clean + validate the rows
+    segs = []
+    prev = pe_start
+    preview = []
+    for _, r in edited.iterrows():
+        mins = r.get("minutes")
+        tgt = r.get("target °F")
+        if pd.isna(mins) or pd.isna(tgt):
+            continue
+        mins = int(mins); tgt = float(tgt); ev = int(r.get("event") or 0)
+        segs.append(ProgramSegment(setpoint=tgt, duration_minutes=mins, event=ev))
+        if tgt == prev:
+            kind = "hold"
+        elif mins <= 1:
+            kind = "AFAP " + ("cool" if tgt < prev else "heat")
+        else:
+            rate = abs(tgt - prev) / (mins / 60.0)
+            kind = f"{'cool' if tgt < prev else 'heat'} {rate:.0f}°/hr"
+        preview.append({"seg": len(segs), "target °F": f"{tgt:g}",
+                        "minutes": mins, "ramp/hold": kind})
+        prev = tgt
+
+    total_h = sum(s.duration_minutes for s in segs) / 60.0
+    if preview:
+        st.caption(f"{len(segs)} segment(s) · ~{total_h:.1f}h of ramps "
+                   "(holds/soaks add more) · start "
+                   f"{pe_start:g}°F, tolerance ±{pe_tol:g}°")
+        st.dataframe(pd.DataFrame(preview), use_container_width=True, hide_index=True)
+
+    pe_pw = st.text_input("Controller password (only if writes are protected)",
+                          type="password", key="pe_pw")
+
+    problems = []
+    if not segs:
+        problems.append("add at least one segment")
+    if len(segs) > 9:
+        problems.append(f"too many segments ({len(segs)}); the controller allows 9")
+    if problems:
+        st.warning("Before writing: " + "; ".join(problems) + ".")
+
+    st.info(f"This will **overwrite slot {int(pe_slot)} on {pe_ctrl}** with the "
+            "program above. The controller stores it permanently.")
+    pe_confirm = st.checkbox(f"Yes, overwrite slot {int(pe_slot)} on {pe_ctrl}",
+                             key="pe_confirm")
+    if st.button("✍️ Write custom program", type="primary",
+                 disabled=bool(problems) or not pe_confirm):
+        with st.spinner("Grabbing Bluetooth and writing…"):
+            try:
+                bridge.call(
+                    monitor.write_program_now(
+                        pe_ctrl, int(pe_slot), segs,
+                        tolerance=float(pe_tol), start_setpoint=float(pe_start),
+                        link_to=int(pe_link),
+                        password=(int(pe_pw) if pe_pw.strip().isdigit() else None)),
+                    timeout=60)
+                ss.pe_df = edited
+                st.success(f"Wrote and verified {len(segs)} segments to slot "
+                           f"{int(pe_slot)} on {pe_ctrl}.")
+                core.render_segments(pe_ctrl, int(pe_slot), monitor)
+                st.caption("Tip: to run it, use the Recovery & Logic page's "
+                           "“Run a program” control, or set it as program 1 to "
+                           "make it this controller's set-and-forget hold.")
+            except Exception as ex:
+                st.error(f"write failed: {ex}")
+
+st.divider()
 
 # ===========================================================================
 # 4. SET GUARANTEED-SOAK TOLERANCE ON AN EXISTING PROGRAM
@@ -369,3 +518,116 @@ else:
                                    "(check password / valid range).")
                 except Exception as e:
                     st.error(f"write failed: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Energy & open data
+# ---------------------------------------------------------------------------
+st.divider()
+st.header("⚡ Energy & open data")
+st.caption("Set your studio name, electricity rate, and each controller's rated "
+           "power so the app can estimate energy and cost per firing — and so the "
+           "Open Data Studio harvest on the home page is attributed and priced. "
+           "Energy is estimated from output% × rated kW; calibrate the kW from a "
+           "clamp-meter reading at 100% output for the truest numbers.")
+
+_ss = core.load_studio_settings()
+es1, es2, es3 = st.columns([2, 1, 1])
+studio_name = es1.text_input("Studio name (attribution)", value=_ss.get("studio", ""))
+rate = es2.number_input("Electricity rate / kWh", min_value=0.0, max_value=2.0,
+                        value=float(_ss.get("rate_per_kwh", 0.0)), step=0.01,
+                        format="%.3f")
+currency = es3.text_input("Currency", value=_ss.get("currency", "USD"))
+
+st.markdown("**Rated power per controller (kW at 100% output)**")
+pk_cols = st.columns(max(1, len(devices)))
+new_kw = {}
+for col, dev in zip(pk_cols, devices):
+    new_kw[dev.name] = col.number_input(
+        f"{dev.name}", min_value=0.0, max_value=200.0,
+        value=float(getattr(dev, "power_kw", 0.0) or 0.0), step=0.5,
+        key=f"kw_{dev.name}")
+
+if st.button("💾 Save energy settings", type="primary"):
+    core.save_studio_settings({"studio": studio_name,
+                               "rate_per_kwh": float(rate),
+                               "currency": currency or "USD"})
+    from devices import save_devices
+    for dev in devices:
+        dev.power_kw = float(new_kw.get(dev.name, 0.0))
+    save_devices(devices)
+    st.success("Saved. The home-page Open Data Studio harvest now uses these.")
+    st.rerun()
+
+# ---------------------------------------------------------------------------
+# Controller config snapshot & audit
+# ---------------------------------------------------------------------------
+st.divider()
+st.header("🗄 Controller config snapshot & audit")
+st.caption("Capture a controller's full configuration (all 20 program tables "
+           "plus the key config registers) with multi-read verification, and "
+           "store it two ways: a canonical JSON with a SHA-256 fingerprint, and "
+           "a human-readable text dump. Use it to confirm nothing gets changed "
+           "along the way — re-snapshot any time and diff against a previous one.")
+
+snap_ctrl = st.selectbox("Controller", [d.name for d in devices], key="snap_ctrl")
+
+sc1, sc2 = st.columns([1, 2])
+if sc1.button("📸 Read & save snapshot", type="primary", key="snap_go"):
+    with st.spinner("Reading all programs and config registers (verified, "
+                    "takes ~30–60s)…"):
+        try:
+            snap = bridge.call(monitor.snapshot_config_now(snap_ctrl), timeout=180)
+            saved = core.save_snapshot(snap_ctrl, snap)
+            st.session_state["last_snap"] = snap
+            st.session_state["last_snap_ctrl"] = snap_ctrl
+            st.success(f"Saved. SHA-256: `{saved['sha256']}`")
+            if snap["meta"]["unstable_reads"]:
+                st.warning("Some reads did not settle and are flagged UNSTABLE: "
+                           + ", ".join(map(str, snap["meta"]["unstable_reads"]))
+                           + ". Re-run if you need a clean capture.")
+        except Exception as e:
+            st.error(f"snapshot failed: {e}")
+
+# Show the most recent capture (this session) + offer downloads
+snap = st.session_state.get("last_snap")
+if snap and st.session_state.get("last_snap_ctrl") == snap_ctrl:
+    import config_snapshot
+    human = config_snapshot.to_human(snap)
+    tampered = not config_snapshot.verify_snapshot(snap)
+    if tampered:
+        st.error("Hash does NOT match the data — snapshot integrity check failed.")
+    st.text_area("Human-readable snapshot", human, height=320, key="snap_human")
+    dl1, dl2 = st.columns(2)
+    import json as _json
+    dl1.download_button("⬇ JSON (canonical)",
+                        _json.dumps(snap, indent=2, sort_keys=True),
+                        file_name=f"{snap_ctrl}_config.json", mime="application/json")
+    dl2.download_button("⬇ Text (human-readable)", human,
+                        file_name=f"{snap_ctrl}_config.txt", mime="text/plain")
+
+# Stored snapshots + diff
+stored = core.list_snapshots(snap_ctrl)
+if stored:
+    st.subheader("Stored snapshots")
+    st.caption(f"{len(stored)} saved under `config_snapshots/{snap_ctrl}/`. "
+               "Compare any two to confirm what (if anything) changed.")
+    labels = [p.stem for p in stored]
+    d1, d2 = st.columns(2)
+    a = d1.selectbox("Older", labels, index=min(1, len(labels) - 1), key="diff_a")
+    b = d2.selectbox("Newer", labels, index=0, key="diff_b")
+    if st.button("🔍 Compare", key="snap_diff"):
+        import config_snapshot
+        sa = core.load_snapshot(stored[labels.index(a)])
+        sb = core.load_snapshot(stored[labels.index(b)])
+        if not config_snapshot.verify_snapshot(sa) or not config_snapshot.verify_snapshot(sb):
+            st.error("One of the snapshots fails its own hash check — it was "
+                     "edited outside this tool. Diff shown anyway.")
+        changes = config_snapshot.diff_snapshots(sa, sb)
+        if not changes:
+            st.success("Identical configuration — nothing changed. "
+                       f"(Both hash to `{sa['meta']['sha256'][:16]}…`)")
+        else:
+            st.warning(f"{len(changes)} difference(s):")
+            for ch in changes:
+                st.write(f"- {ch}")

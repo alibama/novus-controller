@@ -38,6 +38,9 @@ furnace-recovery, and phone notifications — things the official app doesn't do
   the temperature climbs back, and alerts you — with layered safety guards so
   it never drives output on an implausible reading
 - **Notifications** via Telegram, [ntfy](https://ntfy.sh), and/or Twilio SMS
+- **Config snapshot & audit**: capture every program table and config register with multi-read verification, stored as canonical JSON with a SHA-256 fingerprint plus a human-readable dump, and diff two snapshots to prove what changed
+- **Open Data Studio**: the home page harvests per-firing usage as CC-BY open data — energy (kWh) and cost per run, downloadable as CSV or a glass-database-ready XLSX, plus raw telemetry — piping into [glassdatabase.org](https://glassdatabase.org)'s importer
+- **Firing notebook**: record a run's actual curve, compare it segment-by-segment against the program the controller reports it ran, get concrete findings (didn't reach target / power-limited ramp / short soak / dropouts) and suggested adjustments, attach notes + photos, compare two runs to see why the glass differs, and export a self-contained shareable HTML
 
 ## Verified vs unverified
 
@@ -123,6 +126,10 @@ novus-n20k48-ble/
 ├── novus_protocol.py        # pure protocol: framing, CRC, parse/build (no I/O)
 ├── devices.py               # device registry (roles), JSON persistence
 ├── programs_library.py      # standard firing schedules (hold, anneal, fuse, …)
+├── config_snapshot.py       # verified config capture: JSON + human-readable + SHA-256
+├── notebook.py              # firing lab notebook: intended-vs-actual analysis + HTML export
+├── usage.py                 # per-firing energy (kWh) + cost estimation
+├── runs.py                  # pure log readers / firing-run detection
 ├── notify.py                # Telegram / ntfy / Twilio notifications
 ├── kiln_analysis.py         # standalone read-only analytics (optional service)
 ├── kiln_calibrate.py        # ramp-rate characterization tool

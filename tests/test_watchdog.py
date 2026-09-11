@@ -42,8 +42,11 @@ def make(**cfg):
     c = FakeClient()
     cfg.setdefault("dropout_confirm_s", 90)
     cfg.setdefault("cant_hold_confirm_s", 120)
-    wd = WatchdogConfig(enabled=True, expected_setpoint=2100, low_margin=100,
-                        auto_recover=True, **cfg)
+    cfg.setdefault("keep_hot", True)          # these scenarios model a furnace
+    cfg.setdefault("hold_program", 1)
+    cfg.setdefault("expected_setpoint", 2100)
+    cfg.setdefault("low_margin", 100)
+    wd = WatchdogConfig(enabled=True, auto_recover=True, **cfg)
     m = Monitor({"furnace": c}, {"furnace": wd}); m.worry_poll_s = 30
     return m, c
 
@@ -139,3 +142,20 @@ def test_ui_threshold_governs_trigger():
     watch(m, state(2100, True, 0))
     watch(m, state(1950, True, 40))                # above 1900 -> healthy
     assert "furnace" not in m.worried and c.log == []
+
+
+def test_kiln_deliberate_firing_is_left_alone():
+    # A kiln running a non-hold program (a real fuse) must never be touched.
+    m, c = make(keep_hot=False, hold_program=1, expected_setpoint=896)
+    ws = m._watch["furnace"]; ws.low_since = time.time() - 9999
+    watch(m, ControllerState(name="furnace", address="x", connected=True,
+                             pv=700, sp=1465, output_pct=100, running=True,
+                             active_program=3))          # fusing on program 3
+    assert c.log == [] and "furnace" not in m.worried
+
+
+def test_stopped_kiln_not_restarted_when_not_keep_hot():
+    m, c = make(keep_hot=False, dropout_confirm_s=0, expected_setpoint=896)
+    ws = m._watch["furnace"]; ws.low_since = time.time() - 9999
+    watch(m, state(300, False, 0))              # finished/stopped and cool
+    assert ("run", 1) not in c.log

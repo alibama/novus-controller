@@ -29,6 +29,171 @@ HISTORY_LEN = 240
 LOG_DIR = Path(__file__).parent / "logs"
 POLL_INTERVAL_S = 300.0   # intermittent polling: connect, read, free the radio
 WATCHDOG_PATH = Path(__file__).parent / "watchdog_settings.json"
+SNAPSHOT_DIR = Path(__file__).parent / "config_snapshots"
+NOTEBOOK_DIR = Path(__file__).parent / "notebooks"
+STUDIO_PATH = Path(__file__).parent / "studio_settings.json"
+
+
+def load_studio_settings() -> dict:
+    import json as _json
+    if STUDIO_PATH.exists():
+        try:
+            return _json.loads(STUDIO_PATH.read_text())
+        except Exception:
+            pass
+    return {"studio": "", "rate_per_kwh": 0.0, "currency": "USD"}
+
+
+def save_studio_settings(d: dict) -> None:
+    import json as _json
+    try:
+        STUDIO_PATH.write_text(_json.dumps(d, indent=2))
+    except Exception as e:
+        print(f"[app_core] failed to write {STUDIO_PATH}: {e}")
+
+
+def build_usage_records(controllers=None, max_runs_each: int = 30) -> list[dict]:
+    """Turn every detected run across the given controllers into open-data usage
+    rows (energy + cost estimated per device rating and the studio rate)."""
+    import notebook as _nb
+    import usage as _usage
+    devs = {d.name: d for d in get_devices_cached()}
+    ss = load_studio_settings()
+    names = controllers or list(devs.keys())
+    rows = []
+    for name in names:
+        dev = devs.get(name)
+        if not dev:
+            continue
+        for run in detect_recent_runs(name, max_runs=max_runs_each):
+            raw = load_telemetry_window(name, run["start"], run["end"])
+            samples = _nb.parse_rows(raw)
+            if not samples:
+                continue
+            rows.append(_usage.summarize_run(
+                name, dev.role, run["program"], samples,
+                power_kw=getattr(dev, "power_kw", 0.0) or 0.0,
+                rate=(ss.get("rate_per_kwh") or None),
+                currency=ss.get("currency", "USD"),
+                studio=ss.get("studio", "")))
+    rows.sort(key=lambda r: r.get("start_utc", ""), reverse=True)
+    return rows
+
+
+def usage_xlsx_bytes(rows: list[dict]) -> bytes:
+    """A glass-database-ready workbook: sheet 'kiln_firings' (the data) plus a
+    'data_dictionary' sheet. Returns xlsx bytes."""
+    import io
+    import pandas as pd
+    import usage as _usage
+    buf = io.BytesIO()
+    df = pd.DataFrame(rows, columns=_usage.COLUMNS)
+    dd = pd.DataFrame([{"column": k, "description": v}
+                       for k, v in _usage.DATA_DICTIONARY.items()])
+    try:
+        with pd.ExcelWriter(buf, engine="openpyxl") as xw:
+            df.to_excel(xw, sheet_name="kiln_firings", index=False)
+            dd.to_excel(xw, sheet_name="data_dictionary", index=False)
+    except Exception:
+        # openpyxl missing — fall back to a zip-free CSV in a BytesIO
+        buf = io.BytesIO(_usage.to_csv(rows).encode("utf-8"))
+    return buf.getvalue()
+
+
+def telemetry_zip_bytes(controllers=None) -> bytes:
+    """Bundle raw per-day telemetry CSVs into a zip for open-data harvest."""
+    import io
+    import zipfile
+    names = controllers or [d.name for d in get_devices_cached()]
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for name in names:
+            d = LOG_DIR / name
+            if not d.exists():
+                continue
+            for csv_path in sorted(d.glob("*.csv")):
+                z.write(csv_path, arcname=f"{name}/{csv_path.name}")
+    return buf.getvalue()
+
+
+
+def load_telemetry_window(controller: str, start_iso: str, end_iso: str) -> list[dict]:
+    """Raw CSV rows for `controller` within [start_iso, end_iso] (see runs.py)."""
+    import runs
+    return runs.load_telemetry_window(LOG_DIR, controller, start_iso, end_iso)
+
+
+def detect_recent_runs(controller: str, max_runs: int = 6, gap_min: float = 20.0):
+    """Newest-first contiguous program runs from the logs (see runs.py)."""
+    import runs
+    return runs.detect_recent_runs(LOG_DIR, controller, max_runs, gap_min)
+
+
+def save_notebook(controller: str, nb_doc: dict) -> dict:
+    """Persist a notebook as JSON (with embedded telemetry + images) and also
+    write a shareable self-contained HTML. Returns {'json','html'}."""
+    import json as _json
+    import notebook as _nbmod
+    created = nb_doc["meta"].get("created_utc", "")
+    slug = "".join(c if c.isalnum() else "-"
+                   for c in nb_doc["meta"].get("title", "firing"))[:40].strip("-")
+    stamp = created.replace(":", "").replace("-", "") or "entry"
+    d = NOTEBOOK_DIR / controller
+    d.mkdir(parents=True, exist_ok=True)
+    base = d / f"{stamp}__{slug or 'firing'}"
+    jpath = base.with_suffix(".json")
+    hpath = base.with_suffix(".html")
+    jpath.write_text(_json.dumps(nb_doc, indent=2))
+    hpath.write_text(_nbmod.to_html(nb_doc))
+    return {"json": jpath, "html": hpath}
+
+
+def list_notebooks(controller: str) -> list[Path]:
+    d = NOTEBOOK_DIR / controller
+    return sorted(d.glob("*.json"), reverse=True) if d.exists() else []
+
+
+def load_notebook(path) -> dict:
+    import json as _json
+    return _json.loads(Path(path).read_text())
+
+
+
+def save_snapshot(device_name: str, snapshot: dict) -> dict:
+    """Write a config snapshot to disk in both forms (canonical JSON + human
+    readable text), named by capture time. Returns {'json','txt','sha256'}."""
+    import json as _json
+    import config_snapshot
+    ts = snapshot["meta"]["captured_utc"].replace(":", "").replace("-", "")
+    d = SNAPSHOT_DIR / device_name
+    d.mkdir(parents=True, exist_ok=True)
+    jpath = d / f"{ts}.json"
+    tpath = d / f"{ts}.txt"
+    jpath.write_text(_json.dumps(snapshot, indent=2, sort_keys=True))
+    tpath.write_text(config_snapshot.to_human(snapshot))
+    return {"json": jpath, "txt": tpath, "sha256": snapshot["meta"]["sha256"]}
+
+
+def list_snapshots(device_name: str) -> list[Path]:
+    """Newest-first list of stored JSON snapshots for a controller."""
+    d = SNAPSHOT_DIR / device_name
+    if not d.exists():
+        return []
+    return sorted(d.glob("*.json"), reverse=True)
+
+
+def load_snapshot(path) -> dict:
+    import json as _json
+    return _json.loads(Path(path).read_text())
+
+
+# Watchdog fields that are editable from the UI and persisted across restarts.
+WATCHDOG_FIELDS = [
+    "enabled", "auto_recover", "expected_setpoint", "low_margin", "hold_program",
+    "keep_hot", "dropout_confirm_s", "cant_hold_confirm_s", "sustain_s",
+    "recover_floor", "confirm_after_s", "confirm_rise", "max_recoveries",
+    "recover_on_cant_hold",
+]
 
 
 def load_watchdog_settings() -> dict:
@@ -42,9 +207,18 @@ def load_watchdog_settings() -> dict:
 
 
 def save_watchdog_settings(monitor) -> None:
+    """Persist per-furnace trigger temps AND the full per-device watchdog config
+    so the operational state survives restarts and is the source of truth."""
     import json
-    data = {"recover_threshold": {k: v for k, v in monitor.recover_threshold.items()
-                                  if v is not None}}
+    from dataclasses import asdict
+    data = {
+        "recover_threshold": {k: v for k, v in monitor.recover_threshold.items()
+                              if v is not None},
+        "config": {},
+    }
+    for name, cfg in monitor.watchdogs.items():
+        d = asdict(cfg)
+        data["config"][name] = {k: d[k] for k in WATCHDOG_FIELDS if k in d}
     try:
         WATCHDOG_PATH.write_text(json.dumps(data, indent=2))
     except Exception as e:
@@ -56,6 +230,13 @@ def apply_watchdog_settings(monitor) -> None:
     for name, thr in (data.get("recover_threshold") or {}).items():
         if name in monitor.clients:
             monitor.recover_threshold[name] = float(thr)
+    for name, saved in (data.get("config") or {}).items():
+        cfg = monitor.watchdogs.get(name)
+        if not cfg:
+            continue
+        for k in WATCHDOG_FIELDS:
+            if k in saved:
+                setattr(cfg, k, saved[k])
 
 
 # --- async bridge ----------------------------------------------------------
@@ -96,19 +277,27 @@ def get_clients(_bridge: AsyncBridge) -> dict[str, NovusClient]:
 
 @st.cache_resource
 def get_monitor(_bridge: AsyncBridge, _clients: dict) -> Monitor:
-    """Start the always-on monitor once. Watchdogs are built for furnaces."""
+    """Start the always-on monitor once. Every controller gets a watchdog:
+    program 1 is the 'set and forget' hold on all of them. Furnaces are kept
+    hot from any state; kilns are only rescued while actively holding program 1
+    (so real firings on other programs are never disturbed)."""
     devs = get_devices_cached()
     watchdogs = {}
     for d in devs:
-        if d.role == ROLE_FURNACE:
-            watchdogs[d.name] = WatchdogConfig(
-                enabled=True,
-                expected_setpoint=d.expected_setpoint,   # e.g. 2100
-                low_margin=100.0,        # act when PV drops below 2000
-                auto_recover=True,       # restart (stop→start) on a real dropout
-                hold_program=None,       # auto-captured from the last healthy run,
-                                         # else read live from register 247
-            )
+        is_furnace = (d.role == ROLE_FURNACE)
+        watchdogs[d.name] = WatchdogConfig(
+            enabled=True,
+            expected_setpoint=d.expected_setpoint,   # furnace ~2100, kiln ~896
+            low_margin=100.0,                        # trigger this far below hold
+            auto_recover=True,
+            hold_program=1,                          # program 1 = the hold
+            keep_hot=is_furnace,                     # furnaces stay hot from any
+                                                     # state; kilns only while
+                                                     # actively holding program 1
+            # Plausibility floor scales to the hold: ~half the target. Below it,
+            # a reading is too low/uncertain to auto-drive (TC-fault guard).
+            recover_floor=max(200.0, round(d.expected_setpoint * 0.5)),
+        )
     m = Monitor(_clients, watchdogs, poll_interval_s=POLL_INTERVAL_S,
                 hold_connection=False)
     m.start(_bridge.loop)

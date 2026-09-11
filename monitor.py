@@ -76,9 +76,16 @@ class WatchdogConfig:
                                           # (2100 - 100 = act below 2000)
     auto_recover: bool = False            # False = alert only; True = restart
 
-    # Which program to re-run on recovery. If None, it's auto-captured from the
-    # last healthy run, and failing that read live from register 247.
-    hold_program: Optional[int] = None
+    # "Set and forget": program 1 is the hold program on every controller.
+    # Recovery re-runs this program. The watchdog only ENFORCES the hold when
+    # the controller is running this program (or is stopped AND keep_hot is on)
+    # — so it never fights a deliberate firing on some other program.
+    hold_program: Optional[int] = 1
+    keep_hot: bool = False                # True: also restart from a STOPPED
+                                          # state (a furnace, or a kiln you're
+                                          # parking warm). False: only rescue an
+                                          # active hold that's failing; never
+                                          # restart a kiln that finished/stopped.
 
     # --- timing ---
     # A *definitive* dropout (controller reports NOT running) is unambiguous, so
@@ -241,6 +248,31 @@ class Monitor:
                 await c.connect()
                 await c.detect_scaling()
             return await c.read_registers(int(addr), int(count))
+
+    async def read_program_now(self, name, num):
+        """Read one program slot (1..20) RIGHT NOW, grabbing the radio if
+        needed. Returns the Program so the UI can load it into the editor."""
+        async with self._poll_lock:
+            c = self.clients[name]
+            if not c.connected:
+                await c.connect()
+                await c.detect_scaling()
+            prog = await c.read_program(int(num))
+            self.programs.setdefault(name, {})[int(num)] = prog
+            return prog
+
+    async def snapshot_config_now(self, name):
+        """Capture a full, verified configuration snapshot of one controller,
+        grabbing the radio like control() does. Returns the snapshot document
+        (see config_snapshot.build_snapshot). Reading all 20 programs plus the
+        config registers with multi-read verification takes a little while."""
+        import config_snapshot
+        async with self._poll_lock:
+            c = self.clients[name]
+            if not c.connected:
+                await c.connect()
+                await c.detect_scaling()
+            return await config_snapshot.read_snapshot(c)
 
     async def write_register_now(self, name, addr, value, password=None):
         """Write a single raw register value, optionally opening a write
@@ -472,6 +504,24 @@ class Monitor:
                     alert(f"{name}: did NOT recover after restart (PV {pv:g}°, "
                           f"only +{rose:g}°). STOPPED. Needs a human — possible "
                           f"element/SSR/power/sensor fault.", "urgent")
+            return
+
+        # --- defer to deliberate firings & respect keep_hot --------------
+        # If a NON-hold program is running, this is an intentional firing
+        # (fuse, anneal, slump…) — leave it completely alone.
+        if (running and state.active_program
+                and cfg.hold_program is not None
+                and state.active_program != cfg.hold_program):
+            self.worried.discard(name)
+            ws.low_since = None
+            ws.last_alerted_case = None
+            return
+        # If it's stopped and this controller isn't meant to stay hot, don't
+        # auto-restart — its firing may have legitimately finished.
+        if (not running) and (not cfg.keep_hot):
+            self.worried.discard(name)
+            ws.low_since = None
+            ws.last_alerted_case = None
             return
 
         # --- sensor fault: absurdly low reading --------------------------

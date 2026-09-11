@@ -128,39 +128,79 @@ class NovusClient:
 
     # ---- Low-level request/response ----------------------------------------
 
-    async def _request(self, frame_bytes: bytes, expect_fc: int):
-        """Send a built frame; await the matching response frame."""
+    async def _request(self, frame_bytes: bytes, expect_fc: int,
+                       expect_count: Optional[int] = None, retries: int = 2):
+        """Send a built frame; await the RIGHT response frame.
+
+        BLE notifications are async and a slow/late response from a previous
+        request can arrive while we're waiting for this one. Rather than
+        hard-fail on the first frame we see, we discard frames that don't match
+        (bad CRC, wrong function code, or — for reads — the wrong register
+        count) and keep waiting until the matching response arrives or the
+        deadline passes, then retry the send. This is what prevents the
+        "expected FC 0x47, got 0x46" failures and the misaligned reads that
+        crossed a write with a stale read response.
+        """
         if not self.connected:
             raise RuntimeError(f"{self.name}: not connected")
 
+        loop = asyncio.get_event_loop()
         async with self._lock:
-            # Drain any stale notifications before sending
-            while not self._inbox.empty():
-                self._inbox.get_nowait()
+            last_err: Optional[Exception] = None
+            for _attempt in range(retries + 1):
+                # Flush anything stale before sending.
+                while not self._inbox.empty():
+                    self._inbox.get_nowait()
 
-            await self._client.write_gatt_char(self.DATA_CHAR, frame_bytes, response=True)
+                await self._client.write_gatt_char(self.DATA_CHAR, frame_bytes,
+                                                   response=True)
 
-            try:
-                frame = await asyncio.wait_for(self._inbox.get(),
-                                               timeout=self.REQUEST_TIMEOUT_S)
-            except asyncio.TimeoutError:
-                raise TimeoutError(f"{self.name}: no response within {self.REQUEST_TIMEOUT_S}s")
-
-            if not frame.crc_ok:
-                raise IOError(f"{self.name}: CRC error in response")
-            if frame.function_code != expect_fc:
-                raise IOError(
-                    f"{self.name}: expected FC 0x{expect_fc:02x}, "
-                    f"got 0x{frame.function_code:02x}"
-                )
-            return frame
+                deadline = loop.time() + self.REQUEST_TIMEOUT_S
+                while True:
+                    remaining = deadline - loop.time()
+                    if remaining <= 0:
+                        last_err = TimeoutError(
+                            f"{self.name}: no matching response within "
+                            f"{self.REQUEST_TIMEOUT_S}s")
+                        break
+                    try:
+                        frame = await asyncio.wait_for(self._inbox.get(),
+                                                       timeout=remaining)
+                    except asyncio.TimeoutError:
+                        last_err = TimeoutError(
+                            f"{self.name}: no response within {self.REQUEST_TIMEOUT_S}s")
+                        break
+                    # Discard stale / mismatched frames and keep waiting.
+                    if not frame.crc_ok:
+                        last_err = IOError(f"{self.name}: CRC error in response")
+                        continue
+                    if frame.function_code != expect_fc:
+                        last_err = IOError(
+                            f"{self.name}: discarded stale FC "
+                            f"0x{frame.function_code:02x} (wanted 0x{expect_fc:02x})")
+                        continue
+                    if expect_count is not None:
+                        try:
+                            vals = parse_read_response(frame.payload)
+                        except Exception as e:
+                            last_err = IOError(f"{self.name}: parse error: {e}")
+                            continue
+                        if len(vals) != expect_count:
+                            last_err = IOError(
+                                f"{self.name}: discarded misaligned read "
+                                f"({len(vals)} regs, wanted {expect_count})")
+                            continue
+                    return frame
+                # deadline hit for this attempt — loop retries the send
+            raise last_err or IOError(f"{self.name}: request failed")
 
     # ---- Modbus-shaped helpers --------------------------------------------
 
     async def read_registers(self, addr: int, count: int) -> list[int]:
         """Read `count` 16-bit registers starting at `addr`. Returns u16 list."""
         frame = await self._request(build_read_registers(addr, count),
-                                    expect_fc=FC_READ_REGISTERS)
+                                    expect_fc=FC_READ_REGISTERS,
+                                    expect_count=count)
         return parse_read_response(frame.payload)
 
     async def write_register(self, addr: int, value: int) -> None:
@@ -365,6 +405,19 @@ class NovusClient:
     async def stop_program(self) -> bool:
         """Stop execution by clearing the run flag (reg 214 := 0)."""
         await self.write_register(REG_CTRL_RUN, 0)
+        return True
+
+    async def set_manual_setpoint(self, temp: float) -> bool:
+        """Manual override: hold a fixed setpoint in automatic mode, no R&S
+        program. Writes SP (reg 200), automatic mode (213), run (214). Use this
+        to push a furnace to a target on demand or hold a custom temperature.
+        The controller drives its PID toward `temp` and holds until stopped."""
+        raw = int(round(temp * (10 ** self.decimal_places)))
+        await self.write_register(REG_SETPOINT, raw)
+        await asyncio.sleep(0.1)
+        await self.write_register(REG_CTRL_AUTO, 1)
+        await asyncio.sleep(0.1)
+        await self.write_register(REG_CTRL_RUN, 1)
         return True
 
     async def is_running(self) -> int:

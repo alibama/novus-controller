@@ -127,3 +127,62 @@ with c2:
         with st.spinner("Releasing Bluetooth…"):
             core.release_ble(bridge, clients, monitor)
         st.rerun()
+
+# --- Open Data Studio ------------------------------------------------------
+st.divider()
+with st.container(border=True):
+    st.subheader("🌐 Open Data Studio")
+    ss = core.load_studio_settings()
+    studio_name = ss.get("studio") or "This studio"
+    st.caption(f"{studio_name} publishes its kiln & furnace operating data as "
+               "open data (CC-BY-4.0) so anyone can study how real studios use "
+               "energy. Harvest it below — one row per firing, plus the raw "
+               "telemetry. Feeds a cost estimator and pipes straight into "
+               "glassdatabase.org.")
+
+    try:
+        rows = core.build_usage_records()
+    except Exception as e:
+        rows = []
+        st.caption(f"(usage build unavailable: {e})")
+
+    if rows:
+        import usage as _usage
+        total_kwh = sum(r["energy_kwh"] or 0 for r in rows)
+        total_cost = sum(r["cost"] or 0 for r in rows)
+        cur = next((r["currency"] for r in rows if r.get("currency")), "")
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Firings logged", len(rows))
+        m2.metric("Energy (est.)", f"{total_kwh:,.0f} kWh")
+        m3.metric("Cost (est.)", f"{total_cost:,.2f} {cur}" if total_cost else "—")
+        m4.metric("Since", min(r["date_utc"] for r in rows if r["date_utc"]) or "—")
+
+        d1, d2, d3 = st.columns(3)
+        d1.download_button("⬇ Firings (CSV)", _usage.to_csv(rows),
+                           file_name="kiln_firings.csv", mime="text/csv",
+                           use_container_width=True)
+        d2.download_button("⬇ Firings (XLSX · glass-database ready)",
+                           core.usage_xlsx_bytes(rows),
+                           file_name="kiln_firings.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                           use_container_width=True)
+        d3.download_button("⬇ Raw telemetry (ZIP of CSVs)",
+                           core.telemetry_zip_bytes(),
+                           file_name="kiln_telemetry.zip", mime="application/zip",
+                           use_container_width=True)
+        with st.expander("Pipe into glassdatabase.org"):
+            st.markdown(
+                "1. Download **Firings (XLSX)** above.\n"
+                "2. Drop it in the importer's uploads folder and build:\n"
+                "   ```\n"
+                "   python -m central.ingest build --uploads /path/to/folder\n"
+                "   ```\n"
+                "3. It registers as a browsable dataset (chart/map/download) in "
+                "the Explore app. The energy numbers are estimates from output% "
+                "× rated kW — calibrate each controller's kW in Settings for the "
+                "truest cost. Set your studio name and electricity rate in "
+                "Settings too.")
+    else:
+        st.info("No completed firings logged yet — run a program and the harvest "
+                "fills in. Set your studio name, electricity rate, and each "
+                "controller's rated kW under **Settings → Energy & open data**.")
