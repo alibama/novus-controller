@@ -1,3 +1,8 @@
+# !!! DO NOT copy this file verbatim — it contains PLACEHOLDERS.
+# 'youruser' and '/home/youruser/novus-n20k48-ble' are NOT real; installing
+# as-is fails with status=217/USER. Use the installer, which fills in this
+# machine's real path and user:   sudo bash deploy/install-services.sh
+#
 # /etc/systemd/system/kiln-dashboard.service
 #
 # Runs the Streamlit dashboard (which also logs to CSV) as a SYSTEM service.

@@ -1,3 +1,5 @@
+
+> **Installing the systemd units:** do NOT `cp` the `deploy/*.service` files directly — they contain placeholders (`youruser`, `/home/youruser/novus-n20k48-ble`) and will fail with `status=217/USER`. Run `sudo bash deploy/install-services.sh` (add `--with-api`, `--enable`, or `--root` as needed); it fills in this machine's real path and service user.
 # SETUP.md — Shop laptop deployment & hardening
 
 Target machine: `youruser-Latitude-5285` (Ubuntu 24). Goal: all four

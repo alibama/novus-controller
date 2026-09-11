@@ -35,6 +35,16 @@ All notable changes to this project are documented here. This project follows
   target on demand.
 - Plausibility floor now scales to each controller's hold temperature.
 
+### Added (service install)
+- `deploy/install-services.sh`: generates systemd units from the templates with
+  this machine's real repo path and service user (owner of the repo dir, or
+  `--user`/`--root`), avoiding the `status=217/USER` trap from copying the
+  placeholder templates verbatim. Templates now carry a loud "do not copy
+  verbatim" header.
+- `deploy/update.sh` unit-existence check switched to `systemctl cat` (the
+  previous `list-unit-files | grep` missed an installed, enabled unit), plus
+  `deploy/update.conf` support to pin service names.
+
 ### Added (updates)
 - `deploy/update.sh`: one-command update that installs changed deps,
   byte-compiles and runs the test suite as a safety gate, and only then
