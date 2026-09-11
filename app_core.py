@@ -411,6 +411,8 @@ def render_segments(name: str, program_num: int, monitor, active_segment=None):
 def render_kiln_panel(col, dev: Device, state: ControllerState, bridge, monitor,
                       is_furnace: bool = False):
     name = dev.name
+    uid = dev.address            # unique per controller; use in widget keys so
+                                 # two devices with the same name can't collide
     with col:
         if not state.connected:
             st.subheader(f"⚫ {name}")
@@ -426,7 +428,7 @@ def render_kiln_panel(col, dev: Device, state: ControllerState, bridge, monitor,
         m3.metric("Output", f"{state.output_pct:g}%" if state.output_pct is not None else "—")
 
         if is_furnace:
-            _render_furnace_status(name, monitor)
+            _render_furnace_status(name, monitor, uid)
 
         if state.active_program:
             seg = state.active_segment if state.active_segment is not None else "?"
@@ -434,7 +436,7 @@ def render_kiln_panel(col, dev: Device, state: ControllerState, bridge, monitor,
             with st.expander("Segments — what's coming", expanded=not is_furnace):
                 render_segments(name, state.active_program, monitor,
                                 active_segment=state.active_segment)
-            if st.button("⏹ STOP", key=f"stop_{name}", use_container_width=True):
+            if st.button("⏹ STOP", key=f"stop_{uid}", use_container_width=True):
                 with st.spinner("Stopping… (grabbing Bluetooth)"):
                     try:
                         bridge.call(monitor.control(name, "stop_program"), timeout=30)
@@ -449,10 +451,10 @@ def render_kiln_panel(col, dev: Device, state: ControllerState, bridge, monitor,
             st.info("idle")
             c1, c2 = st.columns([2, 1])
             with c1:
-                program = st.selectbox("Program", range(1, 21), key=f"prog_{name}",
+                program = st.selectbox("Program", range(1, 21), key=f"prog_{uid}",
                                        label_visibility="collapsed")
             with c2:
-                if st.button("▶ RUN", key=f"start_{name}", use_container_width=True):
+                if st.button("▶ RUN", key=f"start_{uid}", use_container_width=True):
                     with st.spinner("Starting… (grabbing Bluetooth)"):
                         try:
                             bridge.call(monitor.control(name, "run_program", program),
@@ -472,7 +474,7 @@ def render_kiln_panel(col, dev: Device, state: ControllerState, bridge, monitor,
             st.line_chart(df, height=140)
 
 
-def _render_furnace_status(name: str, monitor):
+def _render_furnace_status(name: str, monitor, uid: str = ""):
     """Watchdog state + auto-recovery arm/disarm for a furnace panel."""
     armed = monitor.recovery_armed.get(name, True)
     ws = getattr(monitor, "_watch", {}).get(name)
@@ -490,14 +492,14 @@ def _render_furnace_status(name: str, monitor):
         st.caption(f"Auto-recovery: {'🟢 **armed**' if armed else '🔴 **disarmed**'}")
     with cc2:
         if armed:
-            if st.button("Disarm", key=f"disarm_{name}", use_container_width=True,
+            if st.button("Disarm", key=f"disarm_{uid}", use_container_width=True,
                          help="Stop the watchdog from auto-restarting this furnace."):
                 monitor.recovery_armed[name] = False
                 if ws:
                     ws.last_alerted_case = None
                 st.rerun()
         else:
-            if st.button("Re-arm", key=f"rearm_{name}", type="primary",
+            if st.button("Re-arm", key=f"rearm_{uid}", type="primary",
                          use_container_width=True,
                          help="Let the watchdog auto-restart this furnace again."):
                 monitor.recovery_armed[name] = True
@@ -516,14 +518,14 @@ def _render_furnace_status(name: str, monitor):
         new = st.number_input(
             "Restart if temperature stays below (°F)",
             min_value=int(floor) + 1, max_value=int(expected) - 1,
-            value=int(cur_line), step=10, key=f"thr_{name}")
+            value=int(cur_line), step=10, key=f"thr_{uid}")
         st.caption(
             f"**What this does:** if **{name}** stays below **{int(new)}°F**, the "
             f"watchdog will automatically **STOP it and RUN the same program again** "
             f"— the exact off/on you do by hand — then confirm the temperature "
             f"climbs back. Holding target is {expected:g}°F; it won't auto-drive "
             f"from below {floor:g}°F (that needs a human).")
-        if st.button("Save trigger", key=f"savethr_{name}", type="primary"):
+        if st.button("Save trigger", key=f"savethr_{uid}", type="primary"):
             monitor.recover_threshold[name] = float(new)
             save_watchdog_settings(monitor)
             if ws:

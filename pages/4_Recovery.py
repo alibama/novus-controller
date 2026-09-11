@@ -39,6 +39,7 @@ def _fmt_secs(s):
 
 
 for dev in devices:
+    _uid = dev.address
     cfg = monitor.watchdogs.get(dev.name)
     ws = monitor._watch.get(dev.name)
     s = core.latest_state(monitor, dev)
@@ -96,12 +97,12 @@ for dev in devices:
         # ---- arm / disarm ----
         ac1, ac2, ac3 = st.columns(3)
         if armed:
-            if ac1.button("🔴 Disarm auto-recovery", key=f"dis_{dev.name}",
+            if ac1.button("🔴 Disarm auto-recovery", key=f"dis_{dev.name}_{_uid}",
                           use_container_width=True):
                 monitor.recovery_armed[dev.name] = False
                 st.rerun()
         else:
-            if ac1.button("🟢 Re-arm auto-recovery", key=f"arm_{dev.name}",
+            if ac1.button("🟢 Re-arm auto-recovery", key=f"arm_{dev.name}_{_uid}",
                           type="primary", use_container_width=True):
                 monitor.recovery_armed[dev.name] = True
                 if ws:
@@ -116,8 +117,8 @@ for dev in devices:
                        "auto-recovery so it won't fight you.")
             tgt = st.number_input("Target °F", min_value=100, max_value=2400,
                                   value=int(s.sp or cfg.expected_setpoint if cfg else 2100),
-                                  step=10, key=f"ovr_{dev.name}")
-            if st.button("Apply override", key=f"ovrgo_{dev.name}", type="primary"):
+                                  step=10, key=f"ovr_{dev.name}_{_uid}")
+            if st.button("Apply override", key=f"ovrgo_{dev.name}_{_uid}", type="primary"):
                 with st.spinner("Grabbing Bluetooth and setting…"):
                     try:
                         bridge.call(monitor.control(dev.name, "set_manual_setpoint",
@@ -129,8 +130,8 @@ for dev in devices:
                         st.error(f"override failed: {e}")
 
         with ac3.popover("▶ Run a program", use_container_width=True):
-            prog = st.selectbox("Program", range(1, 21), key=f"rp_{dev.name}")
-            if st.button("Run", key=f"rpgo_{dev.name}", type="primary"):
+            prog = st.selectbox("Program", range(1, 21), key=f"rp_{dev.name}_{_uid}")
+            if st.button("Run", key=f"rpgo_{dev.name}_{_uid}", type="primary"):
                 with st.spinner("Starting…"):
                     try:
                         bridge.call(monitor.control(dev.name, "run_program", int(prog)),
@@ -145,60 +146,60 @@ for dev in devices:
             with st.expander("⚙️ Edit this controller's recovery logic"):
                 e1, e2, e3 = st.columns(3)
                 cfg.enabled = e1.checkbox("Watchdog enabled", value=cfg.enabled,
-                                          key=f"en_{dev.name}")
+                                          key=f"en_{dev.name}_{_uid}")
                 cfg.keep_hot = e2.checkbox(
-                    "Keep hot from any state", value=cfg.keep_hot, key=f"kh_{dev.name}",
+                    "Keep hot from any state", value=cfg.keep_hot, key=f"kh_{dev.name}_{_uid}",
                     help="On: restart even when stopped (a furnace, or a kiln you're "
                          "parking warm). Off: only rescue an active program-1 hold.")
                 cfg.recover_on_cant_hold = e3.checkbox(
                     "Restart on 'can't hold'", value=cfg.recover_on_cant_hold,
-                    key=f"ch_{dev.name}",
+                    key=f"ch_{dev.name}_{_uid}",
                     help="Restart when output is pinned but temperature is falling "
                          "(a re-latchable SSR/contactor fault).")
 
                 f1, f2, f3 = st.columns(3)
                 cfg.expected_setpoint = f1.number_input(
                     "Hold target °F", value=float(cfg.expected_setpoint), step=10.0,
-                    key=f"es_{dev.name}")
+                    key=f"es_{dev.name}_{_uid}")
                 new_thr = f2.number_input(
                     "Restart if below °F", value=float(low_line or 0), step=10.0,
-                    key=f"th_{dev.name}",
+                    key=f"th_{dev.name}_{_uid}",
                     help="The trigger temperature. Below this (and not recovering) "
                          "→ restart.")
                 cfg.hold_program = f3.number_input(
                     "Hold program #", min_value=1, max_value=20,
-                    value=int(cfg.hold_program or 1), key=f"hp_{dev.name}")
+                    value=int(cfg.hold_program or 1), key=f"hp_{dev.name}_{_uid}")
 
                 g1, g2, g3 = st.columns(3)
                 cfg.dropout_confirm_s = g1.number_input(
                     "Dropout confirm (s)", value=float(cfg.dropout_confirm_s),
-                    step=10.0, key=f"dc_{dev.name}",
+                    step=10.0, key=f"dc_{dev.name}_{_uid}",
                     help="Stopped + low: wait this long, then restart.")
                 cfg.cant_hold_confirm_s = g2.number_input(
                     "Can't-hold confirm (s)", value=float(cfg.cant_hold_confirm_s),
-                    step=10.0, key=f"cc_{dev.name}",
+                    step=10.0, key=f"cc_{dev.name}_{_uid}",
                     help="Running, pinned, falling: wait this long, then restart.")
                 cfg.confirm_after_s = g3.number_input(
                     "Recovery confirm window (s)", value=float(cfg.confirm_after_s),
-                    step=10.0, key=f"ca_{dev.name}",
+                    step=10.0, key=f"ca_{dev.name}_{_uid}",
                     help="After a restart, temperature must rise within this long.")
 
                 h1, h2, h3 = st.columns(3)
                 cfg.recover_floor = h1.number_input(
                     "Don't auto-drive below °F", value=float(cfg.recover_floor),
-                    step=50.0, key=f"rf_{dev.name}",
+                    step=50.0, key=f"rf_{dev.name}_{_uid}",
                     help="Below this the reading is too low/uncertain to trust — "
                          "alert a human instead of driving.")
                 cfg.max_recoveries = int(h2.number_input(
                     "Max restarts / hour", min_value=1, max_value=30,
-                    value=int(cfg.max_recoveries), key=f"mr_{dev.name}",
+                    value=int(cfg.max_recoveries), key=f"mr_{dev.name}_{_uid}",
                     help="After this many in an hour, give up and stop (recurring "
                          "fault needs a human)."))
                 cfg.low_margin = h3.number_input(
                     "Low margin °F (if no trigger set)", value=float(cfg.low_margin),
-                    step=10.0, key=f"lm_{dev.name}")
+                    step=10.0, key=f"lm_{dev.name}_{_uid}")
 
-                if st.button("💾 Save this controller's logic", key=f"sv_{dev.name}",
+                if st.button("💾 Save this controller's logic", key=f"sv_{dev.name}_{_uid}",
                              type="primary"):
                     monitor.recover_threshold[dev.name] = float(new_thr)
                     core.save_watchdog_settings(monitor)

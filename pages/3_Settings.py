@@ -111,6 +111,18 @@ st.caption("Furnaces are temperature-tracked and watched for dropouts. "
            "after a service restart** (we don't disturb a live furnace).")
 
 devs = load_devices()
+
+# Everything (connections, watchdogs, logs, thresholds) is keyed by device
+# NAME, so duplicate names collapse two controllers into one and must be fixed.
+from collections import Counter as _Counter
+_dupes = [n for n, c in _Counter(d.name for d in devs).items() if c > 1]
+if _dupes:
+    st.error(
+        f"⚠️ Duplicate device name(s): **{', '.join(_dupes)}**. Two controllers "
+        "with the same name collapse into one — only one gets monitored, and the "
+        "UI can misbehave. Give each a unique name below (e.g. rename the old one "
+        "to `furnace-old`) or remove the stale one, then **Save** and restart.")
+
 if not devs:
     st.info("No devices yet — scan above and add one.")
 else:
@@ -148,7 +160,10 @@ else:
                 st.rerun()
 
     if changed:
-        if st.button("💾 Save changes", type="primary"):
+        _newdupes = [n for n, c in _Counter(x.name for x in devs).items() if c > 1]
+        if _newdupes:
+            st.warning(f"Fix duplicate name(s) first: {', '.join(_newdupes)}.")
+        elif st.button("💾 Save changes", type="primary"):
             save_devices(devs)
             st.success("Saved. Restart the service to apply: "
                        "`sudo systemctl restart kiln-dashboard`")
@@ -171,6 +186,9 @@ with st.expander("➕ Add a controller by address (no scan needed)"):
                      "(six hex pairs, e.g. 00:26:A4:1A:2B:3C).")
         elif any(x.address.upper() == addr for x in devs2):
             st.warning("That address is already in your list.")
+        elif any(x.name == m_name.strip() for x in devs2):
+            st.warning(f"A device named '{m_name.strip()}' already exists — "
+                       "pick a unique name.")
         else:
             devs2.append(Device(
                 name=m_name.strip(), address=addr, role=m_role,
@@ -593,11 +611,11 @@ currency = es3.text_input("Currency", value=_ss.get("currency", "USD"))
 st.markdown("**Rated power per controller (kW at 100% output)**")
 pk_cols = st.columns(max(1, len(devices)))
 new_kw = {}
-for col, dev in zip(pk_cols, devices):
+for _ki, (col, dev) in enumerate(zip(pk_cols, devices)):
     new_kw[dev.name] = col.number_input(
         f"{dev.name}", min_value=0.0, max_value=200.0,
         value=float(getattr(dev, "power_kw", 0.0) or 0.0), step=0.5,
-        key=f"kw_{dev.name}")
+        key=f"kw_{dev.name}_{_ki}")
 
 if st.button("💾 Save energy settings", type="primary"):
     core.save_studio_settings({"studio": studio_name,
