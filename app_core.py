@@ -32,6 +32,30 @@ WATCHDOG_PATH = Path(__file__).parent / "watchdog_settings.json"
 SNAPSHOT_DIR = Path(__file__).parent / "config_snapshots"
 NOTEBOOK_DIR = Path(__file__).parent / "notebooks"
 STUDIO_PATH = Path(__file__).parent / "studio_settings.json"
+MONITOR_PATH = Path(__file__).parent / "monitor_settings.json"
+
+
+def load_monitor_settings() -> dict:
+    import json as _json
+    d = {"cooperative": True, "poll_interval_s": POLL_INTERVAL_S}
+    if MONITOR_PATH.exists():
+        try:
+            d.update(_json.loads(MONITOR_PATH.read_text()))
+        except Exception:
+            pass
+    return d
+
+
+def save_monitor_settings(d: dict) -> None:
+    import json as _json
+    try:
+        MONITOR_PATH.write_text(_json.dumps(d, indent=2))
+    except Exception as e:
+        print(f"[app_core] failed to write {MONITOR_PATH}: {e}")
+
+
+def _monitor_setting(key, default):
+    return load_monitor_settings().get(key, default)
 
 
 def load_studio_settings() -> dict:
@@ -298,8 +322,10 @@ def get_monitor(_bridge: AsyncBridge, _clients: dict) -> Monitor:
             # a reading is too low/uncertain to auto-drive (TC-fault guard).
             recover_floor=max(200.0, round(d.expected_setpoint * 0.5)),
         )
-    m = Monitor(_clients, watchdogs, poll_interval_s=POLL_INTERVAL_S,
-                hold_connection=False)
+    m = Monitor(_clients, watchdogs,
+                poll_interval_s=_monitor_setting("poll_interval_s", POLL_INTERVAL_S),
+                hold_connection=False,
+                cooperative=_monitor_setting("cooperative", True))
     m.start(_bridge.loop)
     return m
 

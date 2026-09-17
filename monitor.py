@@ -144,7 +144,8 @@ class Monitor:
     def __init__(self, clients: dict[str, NovusClient],
                  watchdogs: dict[str, WatchdogConfig],
                  poll_interval_s: float = 300.0,
-                 hold_connection: bool = False):
+                 hold_connection: bool = False,
+                 cooperative: bool = True):
         self.clients = clients
         self.watchdogs = watchdogs
         # Time between the START of one poll cycle and the next. Default 5 min.
@@ -154,6 +155,14 @@ class Monitor:
         # cycles. If True, it keeps connections open (lower latency, but it
         # holds the radio continuously).
         self.hold_connection = hold_connection
+        # COOPERATIVE mode (default ON): the monitor is a good BLE citizen. It
+        # ALWAYS disconnects after each brief touch — even when worried — so it
+        # never blocks QuickTune, and if a controller can't be reached (someone
+        # is on QuickTune, or it's powered off) it treats that as "unknown /
+        # in use", logs it quietly, and keeps to the normal slow cadence instead
+        # of escalating to fast polling or recovery. Analytics still fill in
+        # whenever the controller is momentarily free.
+        self.cooperative = cooperative
         self.latest: dict[str, ControllerState] = {}
         self.last_poll_at: Optional[float] = None
         # Cache of program segment tables, keyed by name then program number.
@@ -163,12 +172,16 @@ class Monitor:
         self.request_programs: dict[str, bool] = {n: False for n in clients}
         self._watch: dict[str, _WatchState] = {n: _WatchState() for n in clients}
         self.paused = False           # True while BLE is released to QuickTune
-        # "Worry mode": names of controllers currently in trouble. While this
-        # is non-empty the monitor polls fast (worry_poll_s) and HOLDS the
-        # connection, so a furnace dropout is caught and acted on in seconds
-        # instead of being invisible between 5-minute cycles.
+        # "Worry mode": names of controllers currently in trouble (a real low
+        # reading we could actually take). While non-empty the monitor polls
+        # faster (worry_poll_s) — but in cooperative mode it STILL disconnects
+        # between those faster touches. Unreachable controllers do NOT go here.
         self.worried: set[str] = set()
         self.worry_poll_s = 30.0
+        # Consecutive failed-to-reach counts, and last time we logged about it,
+        # so a QuickTune session (or a powered-off kiln) doesn't spam the log.
+        self._unreachable: dict[str, int] = {n: 0 for n in clients}
+        self._last_unreach_log: dict[str, float] = {}
         # Auto-recovery can be temporarily DISARMED per furnace — e.g. when an
         # operator manually stops it for maintenance — so the watchdog doesn't
         # immediately restart what a human just shut off. Re-armed on manual RUN
@@ -181,6 +194,11 @@ class Monitor:
         self._task: Optional[asyncio.Task] = None
         self._started = False
         self._poll_lock = asyncio.Lock()   # serialize background + manual polls
+
+    # After this many consecutive unreachable cycles, emit ONE gentle alert
+    # (so a genuinely dead furnace still notifies, without per-cycle spam).
+    UNREACHABLE_ALERT_AFTER = 6
+    UNREACH_LOG_EVERY_S = 600.0        # at most one "unreachable" log per 10 min
 
     def start(self, loop: asyncio.AbstractEventLoop):
         if self._started:
@@ -369,30 +387,46 @@ class Monitor:
 
     async def _poll_body(self):
         for name, c in self.clients.items():
+            reachable = True
             try:
                 if not c.connected:
                     await c.connect()
                     await c.detect_scaling()
                 state = await c.read_state()
+                self._unreachable[name] = 0
             except Exception as e:
-                print(f"[monitor] {name} poll failed: {e}")
+                reachable = False
+                self._unreachable[name] = self._unreachable.get(name, 0) + 1
                 state = ControllerState(name=name, address=c.address,
                                         connected=False, pv=None, sp=None)
+                self._log_unreachable(name, e)
             self.latest[name] = state
             self._append_log(name, state)
+
             if name in self.watchdogs and self.watchdogs[name].enabled:
-                await self._watchdog(name, state)
+                if self.cooperative and not reachable:
+                    # Couldn't take a reading. In cooperative mode we do NOT
+                    # treat that as a fault — the controller is most likely in
+                    # use on QuickTune, or powered off. Don't escalate to worry
+                    # or recovery; just note a sustained absence once.
+                    self.worried.discard(name)
+                    n = self._unreachable[name]
+                    if n == self.UNREACHABLE_ALERT_AFTER:
+                        self._alert(
+                            f"{name}: no reading for {n} cycles — it may be in "
+                            f"use on QuickTune, out of range, or powered off. "
+                            f"Not intervening.", name)
+                else:
+                    await self._watchdog(name, state)
 
             # Program-table reads (segments) while we have the connection.
             if state.connected:
                 try:
                     if self.request_programs.get(name):
-                        # Read all 20 programs (one-time, on user request).
                         for pn in range(1, 21):
                             self.programs[name][pn] = await c.read_program(pn)
                         self.request_programs[name] = False
                     elif state.active_program:
-                        # Keep the running program's segments fresh.
                         self.programs[name][state.active_program] = \
                             await c.read_program(state.active_program)
                 except Exception as e:
@@ -400,15 +434,39 @@ class Monitor:
 
         self.last_poll_at = time.time()
 
-        if not self.hold_connection and not self.worried:
-            # Release the radio between cycles so QuickTune can use it — but
-            # NOT while worried: during trouble we keep the link open for fast,
-            # low-latency polling and immediate control.
+        # Release the radio between cycles. In cooperative mode this is
+        # UNCONDITIONAL — even while worried — so a brief fast-poll during real
+        # trouble is still just a touch-and-go and never blocks QuickTune.
+        if self.cooperative or (not self.hold_connection and not self.worried):
             for name, c in self.clients.items():
-                try:
-                    await c.disconnect()
-                except Exception as e:
-                    print(f"[monitor] {name} disconnect failed: {e}")
+                if c.connected:
+                    try:
+                        await c.disconnect()
+                    except Exception as e:
+                        print(f"[monitor] {name} disconnect failed: {e}")
+
+    def _log_unreachable(self, name, err):
+        """Rate-limited log for a controller we couldn't reach, so a QuickTune
+        session or a powered-off kiln doesn't flood the journal."""
+        now = time.time()
+        last = self._last_unreach_log.get(name, 0)
+        if now - last >= self.UNREACH_LOG_EVERY_S:
+            self._last_unreach_log[name] = now
+            n = self._unreachable.get(name, 1)
+            print(f"[monitor] {name} unreachable (in use on QuickTune, off, or "
+                  f"out of range) — {n} cycle(s); leaving it alone. ({err})")
+
+    def _alert(self, msg, name=None):
+        """Best-effort notification + event log, safe to call from the loop."""
+        try:
+            if name:
+                self._log_event(name, msg)
+        except Exception:
+            pass
+        try:
+            notify.send(msg, title="Kiln monitor", priority="low")
+        except Exception:
+            pass
 
     async def _run(self):
         # Announce we're alive (best-effort).
