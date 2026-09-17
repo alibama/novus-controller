@@ -590,42 +590,6 @@ else:
 
 
 # ---------------------------------------------------------------------------
-# Bluetooth sharing (cooperative mode)
-# ---------------------------------------------------------------------------
-st.divider()
-st.header("📶 Bluetooth sharing")
-st.caption("A controller can only talk to one device at a time. In "
-           "**cooperative mode** the monitor is a good neighbour: it connects "
-           "just long enough to read temperature and output, then disconnects, "
-           "so anyone on QuickTune is rarely blocked. If a controller can't be "
-           "reached (someone's on QuickTune, or it's powered off) it's left "
-           "alone — no alarms, no fast polling. Turn cooperative mode OFF only "
-           "if you want the monitor to hold connections for fastest reaction.")
-
-_ms = core.load_monitor_settings()
-bc1, bc2 = st.columns(2)
-coop = bc1.toggle("Cooperative mode (share the radio)",
-                  value=bool(_ms.get("cooperative", True)),
-                  help="ON: always release BLE between brief reads; never block "
-                       "QuickTune. Strongly recommended.")
-poll_min = bc2.slider("Read every (minutes)", 1, 15,
-                      int(round(_ms.get("poll_interval_s", 300) / 60)),
-                      help="How often to take a quick reading. Longer = less "
-                           "chance of bumping a QuickTune user, coarser energy "
-                           "data. 3–5 min is a good balance.")
-st.caption("Even in cooperative mode, a real low-temperature reading still "
-           "triggers the watchdog — sharing the radio doesn't disable safety.")
-
-if st.button("💾 Save Bluetooth settings", type="primary"):
-    new = {"cooperative": bool(coop), "poll_interval_s": float(poll_min * 60)}
-    core.save_monitor_settings(new)
-    # apply live so it takes effect without a restart
-    monitor.cooperative = bool(coop)
-    monitor.poll_interval_s = float(poll_min * 60)
-    st.success(f"Saved. Reading every {poll_min} min, cooperative "
-               f"{'on' if coop else 'off'} — applied now.")
-
-# ---------------------------------------------------------------------------
 # Energy & open data
 # ---------------------------------------------------------------------------
 st.divider()
