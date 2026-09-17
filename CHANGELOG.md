@@ -5,6 +5,16 @@ All notable changes to this project are documented here. This project follows
 
 ## [Unreleased]
 
+### Changed (Bluetooth sharing)
+- The monitor now runs in **cooperative mode by default**: it always
+  disconnects after each brief read (even when worried), so it never blocks a
+  QuickTune user. A controller that can't be reached is treated as "in use or
+  off" — logged (rate-limited), left on the normal slow cadence, and NOT
+  escalated to fast polling or recovery. Real low-temperature readings still
+  trigger the watchdog, so sharing the radio does not disable safety. New
+  Settings → Bluetooth sharing controls (cooperative toggle + read interval),
+  persisted to monitor_settings.json and applied live.
+
 ### Added
 - Multipage Streamlit app: Home (furnace temps + kiln/furnace control panels),
   Analytics, and Settings.
