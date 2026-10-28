@@ -138,7 +138,7 @@ with tab2:
             ["count", "mean", "max"]).reset_index()
         summary.columns = ["PV (°, lower bin)", "samples", "mean °/min", "max °/min"]
 
-        st.dataframe(summary, use_container_width=True, hide_index=True)
+        st.dataframe(summary, width="stretch", hide_index=True)
         st.scatter_chart(heating, x="pv", y="ramp_rate_per_min",
                          size=12, height=400)
 
@@ -159,4 +159,4 @@ with tab3:
             samples=("pv", "count"),
         ).reset_index(drop=True)
         firings["duration"] = firings["ended"] - firings["started"]
-        st.dataframe(firings, use_container_width=True, hide_index=True)
+        st.dataframe(firings, width="stretch", hide_index=True)

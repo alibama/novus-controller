@@ -12,7 +12,7 @@ import streamlit as st
 
 import app_core as core
 
-st.set_page_config(page_title="Kiln analytics", page_icon="📈", layout="wide")
+st.set_page_config(page_title="Analytics", page_icon="📈", layout="wide")
 
 if not core.require_password():
     st.stop()
@@ -112,7 +112,7 @@ with tab2:
         summary = heating.groupby("pv_bin")["ramp_rate_per_min"].agg(
             ["count", "mean", "max"]).reset_index()
         summary.columns = ["PV (°, lower bin)", "samples", "mean °/min", "max °/min"]
-        st.dataframe(summary, use_container_width=True, hide_index=True)
+        st.dataframe(summary, width="stretch", hide_index=True)
         st.scatter_chart(heating, x="pv", y="ramp_rate_per_min", size=12, height=400)
 
 with tab3:
@@ -122,7 +122,7 @@ with tab3:
         st.info("No program runs recorded.")
     else:
         import numpy as np
-        dev = next((d for d in core.get_devices_cached() if d.name == name), None)
+        dev = next((d for d in core.get_devices_cached() if d.name == which), None)
         power_kw = float(getattr(dev, "power_kw", 0.0) or 0.0)
         ss = core.load_studio_settings()
         rate = float(ss.get("rate_per_kwh") or 0.0)
@@ -131,7 +131,7 @@ with tab3:
         if power_kw <= 0 or rate <= 0:
             missing = []
             if power_kw <= 0:
-                missing.append(f"**{name}**'s rated kW")
+                missing.append(f"**{which}**'s rated kW")
             if rate <= 0:
                 missing.append("the electricity rate")
             st.info("To see energy (kWh) and cost per firing, set "
@@ -173,7 +173,7 @@ with tab3:
             firings["cost"] = firings["energy_kwh"].apply(
                 lambda k: round(k * rate, 2) if k is not None else None)
 
-        st.dataframe(firings, use_container_width=True, hide_index=True)
+        st.dataframe(firings, width="stretch", hide_index=True)
 
         if power_kw > 0:
             total_kwh = float(firings["energy_kwh"].fillna(0).sum())

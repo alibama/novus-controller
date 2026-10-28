@@ -1,0 +1,56 @@
+# docker-compose.yml — OPTIONAL container path for the Novus kiln dashboard.
+#
+# The native install is the recommended, best-tested path:
+#     curl -fsSL https://raw.githubusercontent.com/alibama/novus-controller/main/install.sh | bash
+# It sets up a venv + systemd services that restart on failure and at boot.
+#
+# Use this file only if you already run your shop box on Docker. Caveats:
+#
+#   * Bluetooth. bleak (the BLE library) does not drive the adapter itself;
+#     on Linux it talks to the host's BlueZ daemon over the SYSTEM D-BUS.
+#     So the container needs:
+#       - the host's D-Bus socket mounted (/var/run/dbus),
+#       - network_mode: host (BlueZ's HCI sockets live in the host net namespace),
+#       - cap_add NET_ADMIN (to open HCI sockets / scan),
+#     and BlueZ must be installed and running ON THE HOST
+#     (`sudo apt install bluez && sudo systemctl enable --now bluetooth`).
+#     Docker Desktop on macOS/Windows has no BlueZ — this only works on Linux.
+#   * The repo is bind-mounted at /app so logs/, devices.json, notebooks/ and
+#     the secrets live on the host and survive image rebuilds.
+#   * Before `docker compose up`, create the password file the app requires:
+#       mkdir -p .streamlit
+#       printf 'dashboard_password = "%s"\n' "$(openssl rand -base64 9)" > .streamlit/secrets.toml
+#     and optionally copy api.env.example -> api.env, notify.env.example -> notify.env.
+#   * With network_mode: host there is no port mapping; the dashboard is on
+#     http://<host>:8501 and the API on http://<host>:8000 directly.
+
+services:
+  dashboard:
+    build: .
+    image: novus-controller:local
+    container_name: kiln-dashboard
+    network_mode: host
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    volumes:
+      - ./:/app
+      - /var/run/dbus:/var/run/dbus
+    env_file:
+      - path: notify.env
+        required: false
+      - path: api.env
+        required: false
+
+  api:
+    build: .
+    image: novus-controller:local
+    container_name: kiln-api
+    command: ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000"]
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - ./:/app
+    env_file:
+      - path: api.env
+        required: false

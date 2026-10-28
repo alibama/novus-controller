@@ -1,0 +1,33 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info
+
+# Local secrets and per-machine config (never commit these)
+.streamlit/secrets.toml
+notify.env
+api.env
+devices.json
+kiln_config.py
+watchdog_settings.json
+studio_settings.json
+monitor_settings.json
+
+# Runtime data
+logs/
+config_snapshots/
+notebooks/
+notes/
+commands/
+state/
+
+# deploy/update.sh output (keep the directory itself tracked)
+deploy/logs/*.log
+deploy/logs/.reqhash
+!deploy/logs/.gitkeep
+deploy/update.conf
+
+# OS noise
+.DS_Store

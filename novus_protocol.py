@@ -293,6 +293,49 @@ def to_signed(u16: int) -> int:
     return u16 if u16 < 0x8000 else u16 - 0x10000
 
 
+def parse_device_id_response(payload: bytes) -> dict:
+    """Parse a Modbus 'Read Device Identification' (MEI type 14) response
+    payload into {"objects": {id: str}, "vendor", "product", "revision"}.
+
+    Response layout (after slave + FC 0x2B):
+        0e <read_id_code> <conformity> <more_follows> <next_object_id>
+        <num_objects> then num_objects × (<object_id> <len> <bytes>)
+    Object ids 0, 1, 2 are the standard VendorName, ProductCode and
+    MajorMinorRevision. The N20K48 returns e.g.
+        "Novus Automation", "0200 - N20K48 - USB - 1 AI / 1 DO / 1 RL", "1.02"
+    Unknown/truncated bytes are tolerated: whatever parsed is returned.
+    """
+    objects: dict[int, str] = {}
+    if (len(payload) < 8 or payload[1] != FC_READ_DEVICE_ID
+            or payload[2] != MEI_READ_DEVICE_ID):
+        raise ValueError(f"not a device-id response: {payload.hex(' ')}")
+    n = payload[7]
+    i = 8
+    for _ in range(n):
+        if i + 2 > len(payload):
+            break
+        oid, ln = payload[i], payload[i + 1]
+        chunk = payload[i + 2:i + 2 + ln]
+        objects[oid] = chunk.decode("ascii", errors="replace").strip("\x00 ")
+        i += 2 + ln
+    return {
+        "objects": objects,
+        "vendor": objects.get(0, ""),
+        "product": objects.get(1, ""),
+        "revision": objects.get(2, ""),
+    }
+
+
+def build_device_id_response(objects: dict[int, str]) -> bytes:
+    """Build the PAYLOAD of a device-id response (used by tests/simulators)."""
+    body = bytes([SLAVE, FC_READ_DEVICE_ID, MEI_READ_DEVICE_ID, 0x01, 0x01,
+                  0x00, 0x00, len(objects)])
+    for oid, text in objects.items():
+        data = text.encode("ascii", errors="replace")
+        body += bytes([oid, len(data)]) + data
+    return body
+
+
 # ---------------------------------------------------------------------------
 # Streaming reader (for BLE notifications that may arrive in fragments)
 # ---------------------------------------------------------------------------

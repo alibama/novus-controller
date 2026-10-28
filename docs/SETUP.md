@@ -1,293 +1,145 @@
+# Setup, hardening and operations
 
-> **Installing the systemd units:** do NOT `cp` the `deploy/*.service` files directly — they contain placeholders (`youruser`, `/home/youruser/novus-n20k48-ble`) and will fail with `status=217/USER`. Run `sudo bash deploy/install-services.sh` (add `--with-api`, `--enable`, or `--root` as needed); it fills in this machine's real path and service user.
-# SETUP.md — Shop laptop deployment & hardening
+The short version is on the README: run the one-liner on the Linux machine
+with the Bluetooth adapter, open port 8501, scan. This page is everything
+behind that — what the installer does, how to do it by hand, and how to keep
+a shop box running unattended.
 
-Target machine: `youruser-Latitude-5285` (Ubuntu 24). Goal: all four
-controllers live in the dashboard, continuous logging, and the box comes
-back on its own after a reboot or power blip — **with no login required.**
-
-Work top to bottom. Commands assume the project lives at
-`~/kiln-bt-scanner` and your username is `youruser`. If either differs, adjust
-paths in the two `.service` files before installing them.
-
----
-
-## 0. Get a terminal on the machine
-
-Either sit at it, or from another tailnet device:
-```bash
-ssh youruser@your-kiln-host
-```
-
----
-
-## 1. Put the latest files in place
-
-Copy these into `~/kiln-bt-scanner/`, overwriting the old versions:
-
-```
-novus_protocol.py      novus_client.py        kiln_dashboard.py
-kiln_logger.py         kiln_analysis.py       kiln_calibrate.py
-explore_registers.py   kiln_config.py         requirements.txt
-kiln-dashboard.service kiln-analysis.service  SETUP.md
-```
-
-If you're using the git repo, just `git pull`. Otherwise Taildrop them from
-the Mac, or `scp` them in. Quick sanity check that the imports resolve:
+## 1. What `install.sh` does
 
 ```bash
-cd ~/kiln-bt-scanner
-source .venv/bin/activate
-pip install -r requirements.txt          # picks up pandas, autorefresh, etc.
-python -c "import novus_client, kiln_config; print('imports OK')"
+curl -fsSL https://raw.githubusercontent.com/alibama/novus-controller/main/install.sh | bash
 ```
 
----
+1. Installs `git python3 python3-venv python3-pip bluez` with apt if missing.
+2. Clones into `~/novus-controller` (override with `NOVUS_DIR=… ` or
+   `--dir=…`), or `git pull --ff-only` if it's already there.
+3. Creates `.venv` and installs `requirements.txt` + `requirements-api.txt`
+   (+ pytest, so updates can be test-gated).
+4. Generates, once, and never overwrites:
+   - `.streamlit/secrets.toml` → `dashboard_password = "…"` (printed at the end)
+   - `api.env` → `API_WRITE_TOKEN=…` (shown on the Open Data page)
+5. Adds you to the `bluetooth` group (BlueZ access for the service user).
+6. Installs and enables `kiln-dashboard` (port 8501, LAN-bound, password-gated)
+   and `kiln-api` (port 8000) as systemd services from the templates in
+   `deploy/`, with this machine's real path and user filled in.
+7. Prints the URLs.
 
-## 2. Find the new furnace controller's BLE address
+Re-running it updates: pull → deps → `deploy/update.sh` (byte-compile + tests
+→ restart → health check). Flags: `--no-services` (just the venv; run things
+by hand), `--no-api`, `--dir=PATH`.
 
-Make sure nothing is holding BLE connections yet (the service isn't
-installed, and QuickTune Mobile is closed). Then scan:
+Your local files — `devices.json`, `notify.env`, `api.env`,
+`.streamlit/secrets.toml`, `*_settings.json`, `logs/`, `config_snapshots/`,
+`notebooks/`, `notes/`, `state/`, `commands/` — are gitignored, so updates
+never touch them. Everything lives in the repo directory unless you set
+`KILN_DATA_DIR`.
+
+## 2. Running without systemd (laptop / development)
 
 ```bash
-python - <<'PY'
-import asyncio
-from bleak import BleakScanner
-
-async def main():
-    print("scanning 10s...")
-    devs = await BleakScanner.discover(timeout=10, return_adv=True)
-    found = []
-    for d, adv in devs.values():
-        mfg = adv.manufacturer_data or {}
-        is_novus = d.address.upper().startswith("00:26:A4") or (511 in mfg)
-        if is_novus:
-            found.append((d.address, d.name))
-    if not found:
-        print("no Novus controllers seen — power-cycle the furnace controller and retry")
-    for addr, name in sorted(found):
-        print(f"  {addr}   {name}")
-
-asyncio.run(main())
-PY
+bash install.sh --no-services          # or: python3 -m venv .venv && .venv/bin/pip install -r requirements.txt -r requirements-api.txt
+.venv/bin/streamlit run kiln_dashboard.py --server.address 0.0.0.0 --server.port 8501
+.venv/bin/uvicorn api:app --host 0.0.0.0 --port 8000      # optional, in a second terminal
 ```
 
-You should see four addresses. Three you already know (bubba/freezy/
-calliope); the fourth is the furnace. Copy that address.
+Both read `.streamlit/secrets.toml` / `api.env` from the repo directory. The
+dashboard needs the Bluetooth adapter; the API never touches Bluetooth and
+can run anywhere that can see the data directory.
 
----
+Docker is an alternative on Linux hosts (`docker compose up -d`); BlueZ is
+reached over the host's D-Bus, which is why the compose file uses host
+networking and mounts `/var/run/dbus`.
 
-## 3. Add the furnace to the config
+## 3. First contact with the controllers
 
-Edit `kiln_config.py` and fill in the furnace line:
+1. Enable Bluetooth on each controller's front-panel menu.
+2. Close QuickTune Mobile on every phone — a controller only serves one BLE
+   client at a time and stops advertising while connected.
+3. Dashboard → **Devices → Scan**. Novus-looking devices list first with the
+   reason they matched. Press **Identify** to read the model and firmware,
+   then **Add** and pick the job (furnace / kiln / other).
+4. Pick the furnace in *Which one is the furnace?* if you have one.
+5. On **Recovery & Logic**, check each controller's hold target and trigger
+   temperature. Auto-recovery is on for verified, writable furnaces and
+   kilns; the watchdog never touches a kiln running a program other than its
+   program-1 hold.
+
+From the command line instead:
 
 ```bash
-nano kiln_config.py
-```
-```python
-KILNS = [
-    ("bubba",    "00:26:A4:XX:XX:XX"),
-    ("freezy",   "00:26:A4:XX:XX:XX"),
-    ("calliope", "00:26:A4:XX:XX:XX"),
-    ("furnace",  "00:26:A4:00:XX:XX"),   # <-- the address from step 2
-]
+.venv/bin/python tools/kiln_bt_scanner.py            # Streamlit scanner
+.venv/bin/python novus_client.py 00:26:A4:XX:XX:XX   # identify + read one controller
 ```
 
-This one file is the only place the kiln list lives now.
-
----
-
-## 4. Functional test before installing the service
-
-Run the dashboard by hand once to confirm all four connect:
+## 4. Notifications
 
 ```bash
-streamlit run kiln_dashboard.py --server.address 127.0.0.1 --server.port 8501
+cp notify.env.example notify.env && chmod 600 notify.env
+nano notify.env                      # Telegram / ntfy / Twilio — fill in what you use
+sudo systemctl restart kiln-dashboard
 ```
 
-From a tailnet device, open the Funnel/Serve URL (or
-`http://localhost:8501` if you're at the machine). First load takes ~20–25s
-while it connects to four controllers in turn. Confirm all four columns show
-live PV/SP. Then `Ctrl-C` to stop. CSV logs are now accruing under
-`~/kiln-bt-scanner/logs/<name>/<date>.csv`.
+The installed unit loads `notify.env` automatically. Test from
+**Settings → Test notifications**.
 
----
+## 5. Sharing data (the API)
 
-## 5. Bluetooth permissions for a background service
-
-A system service running as `youruser` needs D-Bus access to BlueZ. Add
-yourself to the `bluetooth` group:
+See [`API.md`](API.md). In short: port 8000 is public-read / token-write.
+To let glassdatabase.org (or anyone on the internet) read it:
 
 ```bash
-sudo usermod -aG bluetooth youruser
+tailscale funnel --bg --https=10000 localhost:8000     # or any reverse proxy with TLS
 ```
 
-(No need to log out — a system service picks up the new group when it
-starts. Group membership in your interactive shell updates after a
-re-login, but that doesn't matter here.)
+then paste the public base URL into **Open Data & API → Public URL**, and
+give `<public>/summary` to the Glass Database. Don't expose port 8501 to the
+internet; keep the dashboard on the LAN or tailnet.
 
----
+## 6. Bluetooth permissions and troubleshooting
 
-## 6. Install the dashboard as a boot service
+- Service user must be in the `bluetooth` group (the installer does this; a
+  system service picks it up on restart, no re-login needed). If a scan finds
+  nothing: `rfkill unblock bluetooth`, `bluetoothctl show` → *Powered: yes*,
+  `bluetoothctl scan on` should list devices.
+- "Operation already in progress": a previous discovery is still clearing;
+  wait a few seconds. If it persists, `sudo systemctl restart bluetooth`.
+- **One client per controller.** While the monitor holds a connection,
+  QuickTune can't connect. Cooperative mode (default) connects only for a
+  second or two every poll, so this is rarely a problem; the Home page also
+  has *Release Bluetooth for QuickTune* for a long phone session.
+- A controller that *isn't reachable* is treated as "in use or off" — logged
+  quietly, never escalated to recovery. A controller that *reads low* still
+  triggers the watchdog.
+- Logs: `journalctl -u kiln-dashboard -f`, `journalctl -u kiln-api -f`.
+  Per-controller CSVs under `logs/<name>/<date>.csv`, events under
+  `logs/<name>/events.log`.
+
+## 7. Hardening a shop laptop as a server
+
+- **Don't sleep:** `sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target`
+  and in `/etc/systemd/logind.conf` set `HandleLidSwitch=ignore`,
+  `HandleLidSwitchExternalPower=ignore`, `HandleLidSwitchDocked=ignore`.
+- **Power blip:** in BIOS, set *AC Recovery* / *After power loss* to **Power On**.
+- **Remote access:** Tailscale (`tailscale up --ssh`), disable key expiry for
+  the node in the admin console.
+- **No automatic reboots:** if you use `unattended-upgrades`, keep
+  `Unattended-Upgrade::Automatic-Reboot "false";`. Update between firings.
+- **Verify cold boot:** `sudo reboot`, do *not* log in, wait two minutes:
+  dashboard loads, `systemctl status kiln-dashboard` is active since boot.
+
+## 8. Updating and rolling back
 
 ```bash
-sudo cp ~/kiln-bt-scanner/kiln-dashboard.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable kiln-dashboard
-sudo systemctl start kiln-dashboard
-sudo systemctl status kiln-dashboard        # should be active (running)
-journalctl -u kiln-dashboard -f             # watch live logs; Ctrl-C to exit
+bash ~/novus-controller/install.sh          # same as the one-liner
+# or, finer control:
+cd ~/novus-controller && git pull && bash deploy/update.sh [--api] [--rollback-on-failure]
 ```
 
-`enable` makes it start at boot. `Restart=always` + `StartLimitIntervalSec=0`
-in the unit means it relaunches forever even if it crashes or a kiln is off.
+`deploy/update.sh` validates (compile + tests) before restarting, health-checks
+each service, dumps the journal on failure, and logs to `deploy/logs/`. Roll
+back by hand with `git checkout <previous-commit> && bash deploy/update.sh`.
+Restarting the dashboard pauses the software watchdog for a few seconds; the
+controllers keep running their programs. Avoid updating mid-recovery.
 
-(Optional) the read-only analysis page on port 8502, which can run alongside
-because it never touches Bluetooth:
-```bash
-sudo cp ~/kiln-bt-scanner/kiln-analysis.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now kiln-analysis
-```
-
----
-
-## 7. Stop the laptop from ever sleeping
-
-This is the big one for a laptop acting as a server. Block all sleep states
-and tell it to ignore the lid:
-
-```bash
-sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target
-```
-
-Then edit logind:
-```bash
-sudo nano /etc/systemd/logind.conf
-```
-Set (uncomment and change) these lines:
-```
-HandleLidSwitch=ignore
-HandleLidSwitchExternalPower=ignore
-HandleLidSwitchDocked=ignore
-```
-Leave `HandlePowerKey` alone so you can still force-off by holding power.
-This takes effect on the reboot in step 10 (or `sudo systemctl restart
-systemd-logind`, but that can end your GUI session — easier to just reboot).
-
----
-
-## 8. Survive a power blip (BIOS)
-
-So the box powers itself back on after a shop power loss:
-
-1. Reboot and tap **F2** at the Dell logo to enter BIOS setup.
-2. **Power Management → AC Recovery** (sometimes "AC Power Recovery").
-3. Set it to **Power On** (not "Last State", not "Power Off").
-4. Save & exit.
-
-While you're in there, confirm the clock/date is right (helps with log
-timestamps and TLS).
-
----
-
-## 9. Make sure Tailscale comes back on its own
-
-```bash
-sudo systemctl enable --now tailscaled
-tailscale up --ssh                 # re-assert SSH access over the tailnet
-tailscale serve status             # confirm the :443 -> localhost:8501 proxy
-tailscale funnel status            # confirm public Funnel is still configured
-```
-
-In the Tailscale **admin console**, on this machine: confirm **"Disable key
-expiry"** is on, so the node never needs a manual re-auth.
-
-The Serve/Funnel config persists across reboots; step 10 verifies it.
-
----
-
-## 10. Reboot and verify the whole thing comes back cold
-
-```bash
-sudo reboot
-```
-
-**Do not log in.** Wait ~1–2 minutes, then from another device:
-
-- Hit the Funnel URL → dashboard loads, all four kilns connect.
-- `ssh youruser@your-kiln-host` still works.
-- `sudo systemctl status kiln-dashboard` → active (running), and note the
-  uptime started at boot, proving it came up without a login.
-
-If all three are true, the box is hardened: power blip → BIOS powers it on →
-tailscaled + the dashboard service start at boot → Funnel re-exposes it →
-logging resumes. No keyboard, no login.
-
----
-
-## Operating notes & gotchas
-
-- **One BLE client at a time per controller.** While the service holds
-  connections, QuickTune Mobile can't connect to those kilns, and neither
-  can a second copy of the dashboard. To use QuickTune or run
-  `kiln_calibrate.py`, stop the service first:
-  `sudo systemctl stop kiln-dashboard`, do your thing, then `start` it again.
-
-- **Calibration** (`kiln_calibrate.py`) and **the dashboard** both drive
-  BLE, so they can't run together. Stop the service first.
-
-- **Don't enable automatic OS reboots.** A surprise reboot mid-firing is
-  worse than a delayed update. If you set up `unattended-upgrades`, leave
-  `Unattended-Upgrade::Automatic-Reboot "false";`. Update manually between
-  firings.
-
-- **Logs growth.** Journald keeps service stdout. If it ever gets large:
-  `sudo journalctl --vacuum-time=30d`. CSV logs are tiny; leave them.
-
-- **Updating code later.** Drop new files in, then
-  `sudo systemctl restart kiln-dashboard`. Adding a kiln = edit
-  `kiln_config.py`, then restart.
-
-- **Quick service controls.**
-  - status: `systemctl status kiln-dashboard`
-  - live logs: `journalctl -u kiln-dashboard -f`
-  - restart: `sudo systemctl restart kiln-dashboard`
-  - stop (to free BLE): `sudo systemctl stop kiln-dashboard`
-
-
-## Updating
-
-Pull the latest code and run the update script — it validates the new code
-**before** restarting anything, so a broken pull can't take the watchdog down:
-
-```bash
-git pull
-bash deploy/update.sh
-```
-
-What it does: installs dependencies only if `requirements*.txt` changed,
-byte-compiles and runs the test suite as a safety gate, and only then restarts
-the systemd services that exist (`kiln-dashboard`, and `kiln-api` /
-`kiln-analysis` if installed). It health-checks each service and, on failure,
-dumps the journal so you can see why. Everything is logged to
-`deploy/logs/update-<timestamp>.log` (with `latest.log` pointing at the newest,
-keeping the last 30).
-
-Useful flags:
-- `--pull` — do the `git pull --ff-only` for you.
-- `--api` — also install `requirements-api.txt` (the open-data API).
-- `--force-deps` — reinstall dependencies even if unchanged.
-- `--rollback-on-failure` — if a service won't come back, checkout the previous
-  commit and restart.
-
-Override the service list with `KILN_SERVICES="my-dash my-api" bash deploy/update.sh`.
-
-Your local config (`devices.json`, `notify.env`, `kiln_config.py`,
-`watchdog_settings.json`, `studio_settings.json`, `logs/`) is gitignored, so
-updates never disturb your device list, thresholds, or history. Restarting the
-dashboard briefly pauses the software watchdog (a few seconds) — the
-controllers keep running their programs; avoid updating mid-recovery.
-
-For the test gate to run, install the dev deps into the venv once:
-`.venv/bin/pip install pytest fastapi httpx`.
+Service names can be pinned in `deploy/update.conf` (`KILN_SERVICES="kiln-dashboard kiln-api"`).

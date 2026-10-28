@@ -98,12 +98,12 @@ for dev in devices:
         ac1, ac2, ac3 = st.columns(3)
         if armed:
             if ac1.button("🔴 Disarm auto-recovery", key=f"dis_{dev.name}_{_uid}",
-                          use_container_width=True):
+                          width="stretch"):
                 monitor.recovery_armed[dev.name] = False
                 st.rerun()
         else:
             if ac1.button("🟢 Re-arm auto-recovery", key=f"arm_{dev.name}_{_uid}",
-                          type="primary", use_container_width=True):
+                          type="primary", width="stretch"):
                 monitor.recovery_armed[dev.name] = True
                 if ws:
                     ws.needs_human = False
@@ -111,7 +111,7 @@ for dev in devices:
                 st.rerun()
 
         # ---- manual override: push to any temperature now ----
-        with ac2.popover("🎛 Manual override", use_container_width=True):
+        with ac2.popover("🎛 Manual override", width="stretch"):
             st.caption("Hold a fixed temperature right now (no program). Use to "
                        "push higher, or hold a custom target. Disarms "
                        "auto-recovery so it won't fight you.")
@@ -129,7 +129,7 @@ for dev in devices:
                     except Exception as e:
                         st.error(f"override failed: {e}")
 
-        with ac3.popover("▶ Run a program", use_container_width=True):
+        with ac3.popover("▶ Run a program", width="stretch"):
             prog = st.selectbox("Program", range(1, 21), key=f"rp_{dev.name}_{_uid}")
             if st.button("Run", key=f"rpgo_{dev.name}_{_uid}", type="primary"):
                 with st.spinner("Starting…"):

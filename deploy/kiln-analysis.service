@@ -13,9 +13,11 @@
 # If you don't want a second always-on app, skip this entirely and just run
 #   streamlit run kiln_analysis.py --server.port 8502
 # by hand whenever you want to look at performance data.
+#
+# Install: `sudo bash deploy/install-services.sh --with-analysis --enable`
 
 [Unit]
-Description=Raging Buffalo Glass Studio kiln analysis (read-only, CSV logs)
+Description=Novus kiln analysis (read-only, CSV logs)
 After=network-online.target
 Wants=network-online.target
 

@@ -107,7 +107,7 @@ with c2:
 with c3:
     name_filter = st.text_input("Filter: name contains", "").strip().lower()
 
-if st.button("🔍 Scan now", type="primary", use_container_width=True):
+if st.button("🔍 Scan now", type="primary", width="stretch"):
     with st.spinner(f"Scanning for {scan_duration}s…"):
         try:
             results = asyncio.run(scan_ble(scan_duration))
@@ -174,7 +174,7 @@ if "last_scan" in st.session_state:
             }
             for r in filtered
         ]
-        st.dataframe(table, use_container_width=True, hide_index=True)
+        st.dataframe(table, width="stretch", hide_index=True)
 
         with st.expander("🔧 Raw advertisement data"):
             st.json(results)

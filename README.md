@@ -1,80 +1,131 @@
-# novus-n20k48-ble
+# novus-controller
 
-An unofficial Python client and web app for **Novus N20K48** process
-controllers over their Bluetooth Low Energy interface — the same interface
-used by Novus's *QuickTune Mobile* app.
+A web dashboard, always-on monitor, and open-data API for **Novus** PID
+kiln/furnace controllers over Bluetooth Low Energy — the same link Novus's
+*QuickTune Mobile* app uses. Built and hardware-verified on the **N20K48**
+(a PID process controller with a 20-program Ramp & Soak engine); it finds and
+reads other Novus controllers too, and keeps them read-only until you say
+otherwise.
 
-The protocol was reverse-engineered from packet captures of QuickTune Mobile
-sessions against running N20K48 controllers and then cross-checked against
-Novus's official communication-protocol PDF; see
-[`docs/PROTOCOL.md`](docs/PROTOCOL.md) for the full decode. **This work is
-unofficial and not affiliated with Novus Automation.** It exists because the
-controllers are deployed in a small glass studio that wanted one web dashboard
-covering several kilns and a furnace at once, with logging, automatic
-furnace-recovery, and phone notifications — things the official app doesn't do.
+> **Unofficial.** Not affiliated with Novus Automation. The protocol was
+> reverse-engineered from QuickTune captures and cross-checked against Novus's
+> protocol PDF — see [`docs/PROTOCOL.md`](docs/PROTOCOL.md). Writing the wrong
+> register can ruin a firing, or worse on a furnace at 2000 °F+. Keep a hand
+> on the physical controls.
 
-> [!IMPORTANT]
-> Use at your own risk. Writing the wrong register on a kiln can ruin a
-> firing — or worse, on a furnace running at 2000 °F+. Read
-> [`docs/PROTOCOL.md`](docs/PROTOCOL.md) before doing anything beyond reading
-> PV/SP, and keep a hand on the physical controls.
+---
+
+## Install (one line)
+
+On the Linux box that has the Bluetooth adapter (Ubuntu/Debian, Raspberry Pi
+OS…):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/alibama/novus-controller/main/install.sh | bash
+```
+
+That clones the repo to `~/novus-controller`, makes a venv, installs
+dependencies, generates a dashboard passphrase and an API write token, adds
+you to the `bluetooth` group, installs and starts two systemd services
+(`kiln-dashboard` on port 8501, `kiln-api` on port 8000), and prints the URLs
+and the passphrase.
+
+**Update** by running the same line again (or `bash ~/novus-controller/install.sh`).
+It pulls, installs changed dependencies, byte-compiles and runs the test
+suite, and only then restarts the services — a broken update never takes the
+furnace watchdog down. Flags: `--no-services` (dev laptop), `--no-api`,
+`--dir=PATH`.
+
+Prefer Docker? `docker compose up -d` (Linux only; BlueZ over the host D-Bus —
+see the notes at the top of [`docker-compose.yml`](docker-compose.yml)).
+
+Then open `http://<that-machine>:8501`, enter the passphrase, and go to
+**Devices → Scan**.
 
 ---
 
 ## What it does
 
-- Talks to **multiple N20K48 controllers concurrently** over BLE
-- Reads process variable, setpoint, output power, and program-execution state
-- Starts and stops **Ramp & Soak programs (1–20)** and writes full program tables
-- A multipage **Streamlit** app:
-  - **Home** — furnace temperatures up top, kiln control panels below
-  - **Analytics** — PV/SP history, ramp-rate-vs-temperature, firing summaries
-  - **Settings** — BLE scanner, device roles, a standard-program writer, a
-    notification tester, and a raw register console
-- **Always-on background monitor** that logs every controller to CSV and runs
-  independent of any open browser tab
-- A **furnace watchdog**: if a furnace drops below a temperature you set, it
-  automatically does the same stop/start recovery you'd do by hand, confirms
-  the temperature climbs back, and alerts you — with layered safety guards so
-  it never drives output on an implausible reading
-- **Notifications** via Telegram, [ntfy](https://ntfy.sh), and/or Twilio SMS
-- **Config snapshot & audit**: capture every program table and config register with multi-read verification, stored as canonical JSON with a SHA-256 fingerprint plus a human-readable dump, and diff two snapshots to prove what changed
-- **Open-data API** (optional): a read-only FastAPI service (`/firings`, `/summary`, `/devices`, `/firings.csv`) publishing energy & cost — CORS-open, CC-BY, no device addresses; see [`docs/API.md`](docs/API.md)
-- **Open Data Studio**: the home page harvests per-firing usage as CC-BY open data — energy (kWh) and cost per run, downloadable as CSV or a glass-database-ready XLSX, plus raw telemetry — piping into [glassdatabase.org](https://glassdatabase.org)'s importer
-- **Firing notebook**: record a run's actual curve, compare it segment-by-segment against the program the controller reports it ran, get concrete findings (didn't reach target / power-limited ramp / short soak / dropouts) and suggested adjustments, attach notes + photos, compare two runs to see why the glass differs, and export a self-contained shareable HTML
+**Find and name your controllers** — *Devices* page
+- Scan over Bluetooth. Anything that looks like Novus (MAC prefix `00:26:A4`,
+  manufacturer id 511, the Novus BLE service, or a model-like name) is listed
+  first with the reason it matched; everything else can be shown too.
+- **Identify** connects briefly and reads the device identification (vendor,
+  product code, firmware) so you know exactly which model you have.
+- Add it, name it, and pick its job: **furnace** (keep hot, watched,
+  auto-recovered), **kiln** (runs programs), or **other** (monitor only). A
+  one-line *Which one is the furnace?* picker covers the common case.
+- Unverified models stay **read-only** until you flip *Allow writes*.
+- Changes apply to the running monitor immediately — no restart.
 
-## Verified vs unverified
+**Watch and control** — *Home* page
+- Furnace temperature cards up top; kiln panels with PV/SP/output, the
+  running program and its segments, RUN/STOP, and a sparkline.
+- Always-on background monitor logs every controller to CSV and runs even with
+  no browser open. Cooperative by default: it connects, reads, disconnects, so
+  QuickTune on a phone is never blocked.
+- **Furnace watchdog**: if a furnace stays below your trigger temperature it
+  does the same stop/start you'd do by hand, confirms the climb, and alerts
+  you (Telegram / ntfy / Twilio SMS) — with guards so it never drives output
+  on an implausible reading. Every threshold is editable on *Recovery & Logic*.
 
-**Verified end-to-end against real hardware:**
-- Frame format, framing CRC (Modbus CRC-16), all three function codes
-- Reading the operation block (registers 200–214): PV, SP, output, run/auto flags
-- Starting/stopping programs (program-select 247, auto 213, run 214)
-- Reading and writing full program tables (start setpoint, 9 segments, tolerance)
-- Multi-register writes; whole-degree °F scaling on the test units
+**Program it** — *Settings* page
+- Write standard schedules (hold, anneal-down, full/tack fuse, slump, casting,
+  fire polish) or build your own 9-segment program and write it to any slot.
+- Guaranteed-soak tolerance editor, notification tester, raw register
+  console, Bluetooth-sharing settings, and verified config snapshots with
+  SHA-256 fingerprints and diffs.
 
-**Not fully verified — help wanted:**
-- The password/session mechanism on protected controllers (register 51/53)
-- Power-loss resume behavior (register 253 is suspected but unconfirmed)
-- "Active segment" semantics when programs link or loop
-- Behavior on related Novus controllers (N1200, N480D, etc.)
+**Understand it** — *Learn* page
+- What a PID controller does (and a live read of your controller's PID
+  terms), how Ramp & Soak programs work, why glass must be annealed, a
+  thickness-based anneal-schedule calculator you can write straight to a slot,
+  fusing/slumping/casting temperatures, heat-work, and what the watchdog does
+  in plain language.
 
-See [`docs/PROTOCOL.md`](docs/PROTOCOL.md) for the complete open-questions list.
+**Analyse it** — *Analytics* and *Notebook* pages
+- PV/SP history, ramp-rate-vs-temperature, firing summaries with energy and
+  cost.
+- A firing notebook that compares what the program asked for to what the
+  controller actually did, suggests adjustments, attaches notes and photos,
+  compares two runs, and exports a self-contained HTML.
+
+**Share it** — *Open Data & API* page and the `kiln-api` service
+- Studio name, electricity rate, rated kW per controller (for cost estimates
+  and attribution).
+- Live API status, the public URL, the write token (show / regenerate), and
+  the control-commands switch.
+- One-click harvest: firings as CSV or a glassdatabase.org-ready XLSX, raw
+  telemetry as a zip, and the exact `/summary` URL to hand to the Glass
+  Database.
 
 ---
 
-## Quick start
+## The API: public read, authorized write
 
-**Requirements:** a Linux host with a working Bluetooth adapter (developed on
-Ubuntu 24), Python 3.10+, and an N20K48 with the BLE module.
+All reads are unauthenticated, CORS-open, CC-BY-4.0, and **never contain a
+Bluetooth address or a secret**. Writes need `Authorization: Bearer <token>`
+(the token lives in `api.env`; the installer generates it). Full reference in
+[`docs/API.md`](docs/API.md).
 
-```bash
-git clone https://github.com/<your-user>/novus-n20k48-ble.git
-cd novus-n20k48-ble
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-```
+| | Endpoint | Returns |
+|---|---|---|
+| GET | `/live` | latest PV / SP / output / program / watchdog state per controller |
+| GET | `/summary` | totals and rollups — the glassdatabase.org contract |
+| GET | `/firings`, `/firings.csv` | one row per firing: energy, cost, heat-work |
+| GET | `/devices` | per-controller aggregates and model |
+| GET | `/events`, `/notes`, `/commands` | audit trail, notes, queued commands |
+| POST | `/notes` | attach a note to a controller or firing |
+| POST | `/commands` | queue `run_program` / `stop_program` / `set_manual_setpoint` / `poll` |
 
-### Talk to one controller from Python
+Commands are executed by the dashboard's monitor (the only process that owns
+the Bluetooth radio) within a few seconds, through the same safety rules as
+the on-screen buttons; read-only controllers reject them.
+
+---
+
+## Talk to one controller from Python
+
 ```python
 import asyncio
 from novus_client import NovusClient
@@ -82,64 +133,61 @@ from novus_client import NovusClient
 async def main():
     c = NovusClient("kiln1", "00:26:A4:XX:XX:XX")   # your BLE address
     await c.connect()
+    print(await c.read_device_id())                 # vendor / product / firmware
+    await c.detect_scaling()                        # decimal places + °C/°F
     s = await c.read_state()
-    print(f"PV={s.pv}  SP={s.sp}  output={s.output_pct}%  running={s.running}")
-    if s.active_program:
-        print(f"program {s.active_program}, segment {s.active_segment}")
+    print(f"PV={s.pv}{c.unit} SP={s.sp} output={s.output_pct}% running={s.running}")
     await c.disconnect()
 
 asyncio.run(main())
 ```
 
-### Find your controllers
-```bash
-python tools/kiln_bt_scanner.py        # look for the 00:26:A4 OUI / mfg id 511
-python tools/explore_registers.py 00:26:A4:XX:XX:XX   # read-only probe
-```
+Command-line helpers for probing a controller live in [`tools/`](tools/README.md).
 
-### Run the app
-```bash
-streamlit run kiln_dashboard.py
-```
-On first launch, open **Settings → Find controllers**, scan, add your devices,
-and set each one's role (furnace or kiln). Or copy `kiln_config.example.py` to
-`kiln_config.py` and list them there. Then open the URL Streamlit prints
-(default `http://localhost:8501`).
+## Verified vs unverified
 
-> While the app holds a BLE connection, QuickTune Mobile cannot connect to that
-> same controller — the bridge allows only one client at a time. The app polls
-> intermittently and has a "Release BLE for QuickTune" button.
+**Verified end-to-end against real N20K48 hardware:** frame format and CRC,
+all three function codes, the operation block (PV, SP, output, run/auto
+flags), starting/stopping programs (247 / 213 / 214), reading and writing
+full program tables, whole-degree °F scaling.
 
-Update a running install with `git pull && bash deploy/update.sh` — it validates (compile + tests) before restarting, logs to `deploy/logs/`, and won't restart on a broken pull. For a hardened always-on deployment (systemd units, notifications, remote access), see [`docs/SETUP.md`](docs/SETUP.md).
+**Not fully verified — help wanted:** the password/session mechanism
+(registers 51/53), power-loss resume behaviour (253?), "active segment"
+semantics when programs link, and behaviour on sibling controllers (N1200,
+N1040, N480D…). See the open questions in `docs/PROTOCOL.md`.
 
----
+## Manual setup, hardening, troubleshooting
+
+[`docs/SETUP.md`](docs/SETUP.md) covers what the installer does, running
+without systemd, notifications, exposing the API to the internet, Bluetooth
+permissions, laptop-as-server hardening, and updating/rolling back.
 
 ## Repository layout
 
 ```
-novus-n20k48-ble/
-├── kiln_dashboard.py        # Streamlit entry point (Home page)
-├── pages/                   # Analytics and Settings pages
-├── app_core.py              # shared infra: async bridge, caches, auth, rendering
-├── monitor.py               # always-on poller, CSV logging, furnace watchdog
-├── novus_client.py          # async BLE client (one connection per controller)
+novus-controller/
+├── install.sh               # one-line install + update
+├── kiln_dashboard.py        # Streamlit entry point (Home)
+├── pages/                   # Devices, Analytics, Settings, Recovery & Logic,
+│                            # Notebook, Learn, Open Data & API
+├── app_core.py              # shared infra: async bridge, caches, live device reload
+├── monitor.py               # always-on poller, CSV logs, watchdog, command queue, live.json
+├── novus_client.py          # async BLE client (one per controller)
 ├── novus_protocol.py        # pure protocol: framing, CRC, parse/build (no I/O)
-├── devices.py               # device registry (roles), JSON persistence
-├── programs_library.py      # standard firing schedules (hold, anneal, fuse, …)
-├── config_snapshot.py       # verified config capture: JSON + human-readable + SHA-256
-├── notebook.py              # firing lab notebook: intended-vs-actual analysis + HTML export
-├── usage.py                 # per-firing energy (kWh) + cost estimation
-├── runs.py                  # pure log readers / firing-run detection
-├── api.py                   # optional read-only open-data HTTP API (FastAPI)
-├── notify.py                # Telegram / ntfy / Twilio notifications
-├── kiln_analysis.py         # standalone read-only analytics (optional service)
-├── kiln_calibrate.py        # ramp-rate characterization tool
-├── kiln_config.example.py   # device-list template (copy to kiln_config.py)
-├── notify.env.example       # notification config template
-├── deploy/                  # systemd unit templates
-├── docs/                    # PROTOCOL.md (the decode) and SETUP.md (runbook)
-├── tools/                   # BLE scanner, GATT dumper, register probes (RE aids)
-└── tests/                   # protocol + watchdog unit tests (stubbed, no hardware)
+├── novus_models.py          # what we know about the Novus family; scan classification
+├── devices.py               # device registry (roles, models, write permission)
+├── commands.py              # API → monitor command queue (files)
+├── paths.py                 # where data lives (KILN_DATA_DIR)
+├── api.py                   # open-data API (FastAPI): public read, token write
+├── programs_library.py      # standard firing schedules
+├── glass_science.py         # annealing table/calculator, process and PID explainers
+├── config_snapshot.py       # verified config capture: JSON + text + SHA-256
+├── notebook.py / usage.py / runs.py   # firing analysis, energy/cost, run detection
+├── notify.py                # Telegram / ntfy / Twilio
+├── deploy/                  # systemd unit templates, install-services.sh, update.sh
+├── docs/                    # PROTOCOL.md, SETUP.md, API.md
+├── tools/                   # scanner, GATT dumper, register probes, exporters
+└── tests/                   # 70+ unit tests, no hardware needed
 ```
 
 ## Architecture
@@ -147,36 +195,33 @@ novus-n20k48-ble/
 ```
 Streamlit pages ──bridge.call(coro)──▶ AsyncBridge (one asyncio loop in a
                                        daemon thread, shared process-wide)
-                                              │
-        Monitor (background poller, ──────────┤  await client.read_state() / control()
-        CSV logging, furnace watchdog)        ▼
-                                       NovusClient (one BLE connection per
-                                       controller, held across reruns)
+        Monitor (poller, CSV logs, ──────────┤  await client.read_state() / control()
+        watchdog, command queue,             ▼
+        live.json)                     NovusClient (one BLE connection per controller)
                                               │  await _request(frame, expect_fc)
                                               ▼
                                        novus_protocol  (pure: build/parse/CRC)
                                               │  bleak write_gatt_char / notify
                                               ▼
-                                          BLE → N20K48
-```
+                                          BLE → Novus controller
 
----
+kiln-api (FastAPI, separate service) ◀── reads logs/, state/live.json, notes/
+                                     ──▶ writes commands/*.json  (picked up by Monitor)
+```
 
 ## Contributing
 
 PRs and issues welcome — see [`CONTRIBUTING.md`](CONTRIBUTING.md). Especially
-valuable: confirming/correcting the register map, the password mechanism, the
-resume-mode register, and support for sibling Novus controllers. If you're on
-the Novus team, the open questions are laid out in
-[`docs/PROTOCOL.md`](docs/PROTOCOL.md) — happy to talk.
+valuable: confirming the register map, the password mechanism, the resume-mode
+register, and reports from sibling Novus controllers (the *Identify* button
+gives you the product code to quote).
 
 ## Acknowledgments
 
 - **Novus Automation** for rugged, long-lived controllers
-- The maintainers of [`bleak`](https://github.com/hbldh/bleak), the
-  cross-platform async BLE library this is built on
-- The glass community's firing-schedule knowledge (Bullseye and others) that
-  informed the standard-program templates
+- [`bleak`](https://github.com/hbldh/bleak), the cross-platform async BLE library
+- The glass community's firing-schedule knowledge (Bullseye and others) behind
+  the standard programs and the Learn page
 
 ## License
 

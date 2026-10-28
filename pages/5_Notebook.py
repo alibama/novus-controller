@@ -141,7 +141,7 @@ with tab_new:
             "peak PV": r.get("pv_max", "—"), "actual min": r.get("dur_min", "—"),
             "avg out%": r.get("out_mean", "—"),
             "finding": r.get("finding") or r.get("note") or "ok"}
-            for r in a["segments"]]), use_container_width=True, hide_index=True)
+            for r in a["segments"]]), width="stretch", hide_index=True)
 
         st.markdown("**Suggested adjustments**")
         for s in a["suggestions"]:
@@ -192,7 +192,7 @@ with tab_saved:
             st.markdown("**Notes**"); st.write(d["notes"])
         for im in d.get("images", []):
             st.image(f"data:{im['mime']};base64,{im['data_b64']}",
-                     caption=im.get("name"), use_container_width=True)
+                     caption=im.get("name"), width="stretch")
         st.download_button("⬇ Download shareable HTML", nbmod.to_html(d),
                            file_name=pick.stem + ".html", mime="text/html")
 

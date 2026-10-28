@@ -24,3 +24,8 @@ python tools/explore_registers.py 00:26:A4:XX:XX:XX
 `explore_registers.py` and `kiln_logger.py` import modules from the project
 root and add it to `sys.path` automatically, so they run from anywhere in the
 repo. `kiln_logger.py` also expects a `kiln_config.py` (copy the example).
+
+For day-to-day use you don't need any of these: the dashboard's **Devices**
+page scans, identifies (reads the model and firmware) and adds controllers,
+and `python novus_client.py <ADDRESS>` prints a controller's identification
+and current reading from the shell.

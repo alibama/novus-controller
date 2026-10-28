@@ -19,13 +19,12 @@ if the community improves the protocol decode and broadens hardware coverage.
 ## Dev setup
 
 ```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-pip install pytest
-pytest tests/          # runs without hardware (BLE is stubbed)
+bash install.sh --no-services      # venv + all deps + pytest
+.venv/bin/pytest tests/            # runs without hardware (BLE is stubbed)
 ```
 
-CI runs `pytest` on every push/PR (see `.github/workflows/ci.yml`).
+`deploy/update.sh` runs the same test suite as a gate before restarting
+services, so keep it green.
 
 ## Especially wanted
 

@@ -19,9 +19,10 @@
 #      always points at the newest), keeping the last 30.
 #
 # Options:
-#   --pull                 run `git pull --ff-only` first (default: assume you
-#                          already pulled)
-#   --api                  also install requirements-api.txt (the open-data API)
+#   --pull                 run `git fetch` + `git pull --ff-only` first
+#                          (default: assume you already pulled)
+#   --api                  also install requirements-api.txt (the open-data API);
+#                          implied when api.env exists or kiln-api is installed
 #   --force-deps           reinstall deps even if requirements are unchanged
 #   --rollback-on-failure  if a service won't come back, git-checkout the prior
 #                          commit and restart it
@@ -68,10 +69,13 @@ for a in "$@"; do
     --force-deps) FORCE_DEPS=1 ;;
     --rollback-on-failure) ROLLBACK=1 ;;
     -h|--help)
-      sed -n '3,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+      sed -n '3,36p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) log "unknown option: $a (try --help)" ;;
   esac
 done
+# install.sh writes api.env when it sets up the API, so its presence means the
+# API deps belong in the venv even if nobody passed --api.
+[ -f "$ROOT/api.env" ] && WITH_API=1
 
 log "=== Kiln update $TS ==="
 log "repo: $ROOT"
@@ -86,6 +90,8 @@ fi
 log "current commit: $PREV_COMMIT"
 
 if [ "$DO_PULL" = 1 ] && [ "$PREV_COMMIT" != "unknown" ]; then
+  log "git fetch…"
+  git fetch --prune || fail "git fetch failed (network down? check the remote with: git remote -v)"
   log "git pull --ff-only…"
   git pull --ff-only || fail "git pull failed (resolve conflicts / stash local edits, then retry)"
 fi
@@ -133,14 +139,23 @@ log "byte-compiling (syntax check)…"
 "$PY" -m compileall -q *.py pages/*.py tools/*.py 2>&1 \
   || fail "syntax error in the new code — refusing to restart"
 
-if "$PY" -c "import pytest" >/dev/null 2>&1 && [ -d tests ]; then
-  log "running test suite (safety gate)…"
-  "$PY" -m pytest tests/ -q \
-    || fail "tests failed on the new code — NOT restarting; the running version stays up"
-  log "tests passed."
+if [ -d tests ]; then
+  if ! "$PY" -c "import pytest" >/dev/null 2>&1; then
+    # httpx is what fastapi's TestClient needs for tests/test_api.py.
+    log "pytest not installed in venv — installing it so the test gate can run…"
+    "$PIP" install -q pytest httpx \
+      || log "WARN: could not install pytest; the test gate will be skipped this time"
+  fi
+  if "$PY" -c "import pytest" >/dev/null 2>&1; then
+    log "running test suite (safety gate)…"
+    "$PY" -m pytest tests/ -q \
+      || fail "tests failed on the new code — NOT restarting; the running version stays up"
+    log "tests passed."
+  else
+    log "skipping the test gate (pytest unavailable)."
+  fi
 else
-  log "pytest not installed in venv — skipping the test gate."
-  log "  (recommend: $PIP install pytest fastapi httpx  — so future updates are gated)"
+  log "no tests/ directory — skipping the test gate."
 fi
 
 # ---- 4. restart services that exist ------------------------------------------
@@ -186,11 +201,11 @@ if [ "${#RESTARTED[@]}" -eq 0 ]; then
     log "!! on the OLD code. Restart it yourself so this update takes effect:"
     log "     sudo systemctl restart <your-service-name>   # then set KILN_SERVICES"
     log "   or, if you run it by hand, stop it and relaunch:"
-    log "     $VENV/bin/streamlit run kiln_dashboard.py --server.port 8501 --server.address 127.0.0.1"
+    log "     $VENV/bin/streamlit run kiln_dashboard.py --server.port 8501 --server.address 0.0.0.0"
   else
     log "!! The app does NOT appear to be running. Start it now:"
-    log "     $VENV/bin/streamlit run kiln_dashboard.py --server.port 8501 --server.address 127.0.0.1"
-    log "   (or install and enable deploy/kiln-dashboard.service for a managed service.)"
+    log "     $VENV/bin/streamlit run kiln_dashboard.py --server.port 8501 --server.address 0.0.0.0"
+    log "   (or run  bash install.sh  to set up the systemd services.)"
   fi
   log "=== Update finished: code is updated & validated, but NO service was "
   log "    restarted (see above). Log: $LOG ==="

@@ -44,6 +44,8 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import json
+import os
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -51,10 +53,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+import commands as cmdq
 import notify
+import novus_models
+import paths
 from novus_client import NovusClient, ControllerState, ProgramSegment
 
-LOG_DIR = Path(__file__).parent / "logs"
+LOG_DIR = paths.LOG_DIR
+LIVE_PATH = paths.LIVE_PATH
+COMMANDS_DIR = paths.COMMANDS_DIR
 LOG_HEADER = ["timestamp_utc", "pv", "sp", "output_pct",
               "active_program", "active_segment", "connected"]
 
@@ -191,9 +198,17 @@ class Monitor:
         # persisted. The watchdog restarts the furnace if PV stays below this.
         # If unset for a name, falls back to expected_setpoint - low_margin.
         self.recover_threshold: dict[str, float] = {}
+        # Per-device write permission. A controller whose model this app has
+        # not been verified on is READ-ONLY until the operator opts in; any
+        # control()/write path refuses otherwise. Missing name => allowed.
+        self.writable: dict[str, bool] = {n: True for n in clients}
+        # Per-device descriptive metadata (role, model) published in live.json
+        # so API consumers can label readings. Set by the app from devices.json.
+        self.meta: dict[str, dict] = {n: {} for n in clients}
         self._task: Optional[asyncio.Task] = None
         self._started = False
         self._poll_lock = asyncio.Lock()   # serialize background + manual polls
+        self._last_cmd_check = 0.0
 
     # After this many consecutive unreachable cycles, emit ONE gentle alert
     # (so a genuinely dead furnace still notifies, without per-cycle spam).
@@ -205,6 +220,54 @@ class Monitor:
             return
         self._started = True
         self._task = asyncio.run_coroutine_threadsafe(self._run(), loop)
+
+    # ---- live device set (no restart needed) --------------------------------
+    def add_device(self, client: NovusClient, watchdog: Optional[WatchdogConfig] = None,
+                   writable: bool = True, meta: Optional[dict] = None) -> None:
+        """Start monitoring another controller. Safe while running: the new
+        entry is picked up on the next poll cycle."""
+        name = client.name
+        self.clients[name] = client
+        if watchdog is not None:
+            self.watchdogs[name] = watchdog
+        self.programs.setdefault(name, {})
+        self.request_programs.setdefault(name, False)
+        self._watch.setdefault(name, _WatchState())
+        self._unreachable.setdefault(name, 0)
+        self.recovery_armed.setdefault(name, True)
+        self.writable[name] = bool(writable)
+        self.meta[name] = dict(meta or {})
+
+    async def remove_device(self, name: str) -> None:
+        """Stop monitoring a controller (disconnects it if connected). Does not
+        touch the controller's own state — a running program keeps running."""
+        async with self._poll_lock:
+            c = self.clients.pop(name, None)
+            if c is not None:
+                try:
+                    await c.disconnect()
+                except Exception:
+                    pass
+            for d in (self.watchdogs, self.programs, self.request_programs,
+                      self._watch, self._unreachable, self.recovery_armed,
+                      self.recover_threshold, self.writable, self.meta,
+                      self.latest, self._last_unreach_log):
+                d.pop(name, None)
+            self.worried.discard(name)
+
+    def rename_device(self, old: str, new: str) -> None:
+        """Carry per-device state across a rename (keyed by name everywhere)."""
+        if old == new or old not in self.clients:
+            return
+        for d in (self.clients, self.watchdogs, self.programs, self.request_programs,
+                  self._watch, self._unreachable, self.recovery_armed,
+                  self.recover_threshold, self.writable, self.meta, self.latest,
+                  self._last_unreach_log):
+            if old in d:
+                d[new] = d.pop(old)
+        self.clients[new].name = new
+        if old in self.worried:
+            self.worried.discard(old); self.worried.add(new)
 
     async def scan_now(self, seconds: float = 8.0, novus_oui: str = "00:26:A4"):
         """Discover nearby BLE devices RIGHT NOW, safely.
@@ -262,21 +325,51 @@ class Monitor:
             raise last_err or RuntimeError("scan failed")
 
     @staticmethod
-    def _format_scan(items, novus_oui: str):
+    def _format_scan(items, novus_oui: str = novus_models.NOVUS_OUI):
+        """Normalize scanner output and classify each advertisement. A device
+        counts as Novus if ANY fingerprint matches: the 00:26:A4 MAC prefix,
+        manufacturer id 511, the Novus BLE service UUID, or a model-like name
+        (N20K48, N1200, …) — so sibling controllers show up too, not just the
+        one model this app was built on. `reasons` says which matched."""
         out = []
         for addr, (dev, adv) in items:
             mfg = getattr(adv, "manufacturer_data", None) or {}
-            is_novus = (str(addr).upper().startswith(novus_oui.upper())
-                        or 511 in mfg)
+            name = (getattr(adv, "local_name", None)
+                    or getattr(dev, "name", "") or "")
+            uuids = list(getattr(adv, "service_uuids", None) or [])
+            cls = novus_models.classify_advertisement(str(addr), name, mfg, uuids)
+            if not cls["novus"] and novus_oui and \
+                    str(addr).upper().startswith(novus_oui.upper()):
+                cls = {"novus": True, "reasons": [f"MAC prefix {novus_oui}"],
+                       "model_guess": ""}
             out.append({
                 "address": str(addr).upper(),
-                "name_adv": (getattr(adv, "local_name", None)
-                             or getattr(dev, "name", "") or ""),
+                "name_adv": name,
                 "rssi": getattr(adv, "rssi", None),
-                "novus": is_novus,
+                "novus": cls["novus"],
+                "reasons": cls["reasons"],
+                "model_guess": cls["model_guess"],
+                "mfg_ids": sorted(int(k) for k in mfg.keys()),
             })
         out.sort(key=lambda r: (not r["novus"], -(r["rssi"] or -999)))
         return out
+
+    async def identify_now(self, address: str, name: str = "new") -> dict:
+        """Connect briefly to ANY address (registered or not), read its device
+        identification, unit/scaling and a first PV/SP reading, then disconnect.
+        Read-only. Serialized against polling like every other radio use."""
+        async with self._poll_lock:
+            existing = next((c for c in self.clients.values()
+                             if c.address.upper() == address.upper()), None)
+            c = existing or NovusClient(name, address)
+            try:
+                return await c.identify()
+            finally:
+                if existing is None:
+                    try:
+                        await c.disconnect()
+                    except Exception:
+                        pass
 
     async def control(self, name: str, action, *args):
         """Run a control command on one controller RIGHT NOW, reliably.
@@ -291,6 +384,7 @@ class Monitor:
         await monitor.control("furnace", "stop_program")
         await monitor.control("bubba", "run_program", 5)
         """
+        self._check_writable(name, action)
         async with self._poll_lock:
             c = self.clients[name]
             if not c.connected:
@@ -302,9 +396,23 @@ class Monitor:
             try:
                 self.latest[name] = await c.read_state()
                 self._append_log(name, self.latest[name])
+                self._write_live()
             except Exception as e:
                 print(f"[monitor] {name} post-control read failed: {e}")
             return result
+
+    # Client methods that change controller state. Everything else is a read.
+    WRITE_ACTIONS = {"run_program", "stop_program", "set_manual_setpoint",
+                     "write_program", "write_register", "write_registers",
+                     "set_tolerance", "open_session"}
+
+    def _check_writable(self, name: str, action: str) -> None:
+        if name not in self.clients:
+            raise KeyError(f"unknown device '{name}'")
+        if action in self.WRITE_ACTIONS and not self.writable.get(name, True):
+            raise PermissionError(
+                f"{name} is read-only in this app (its controller model is not "
+                f"verified). Enable writes for it on the Devices page first.")
 
     async def write_program_now(self, name, num, segments, tolerance=0.0,
                                 start_setpoint=0.0, link_to=0, password=None):
@@ -316,6 +424,7 @@ class Monitor:
         `segments` is a list of ProgramSegment(setpoint, duration_minutes, event).
         Returns the read-back Program so the UI can confirm what landed.
         """
+        self._check_writable(name, "write_program")
         async with self._poll_lock:
             c = self.clients[name]
             if not c.connected:
@@ -367,6 +476,7 @@ class Monitor:
     async def write_register_now(self, name, addr, value, password=None):
         """Write a single raw register value, optionally opening a write
         session first. Reads the value back and returns it for confirmation."""
+        self._check_writable(name, "write_register")
         async with self._poll_lock:
             c = self.clients[name]
             if not c.connected:
@@ -433,6 +543,7 @@ class Monitor:
                     print(f"[monitor] {name} program read failed: {e}")
 
         self.last_poll_at = time.time()
+        self._write_live()
 
         # Release the radio between cycles. In cooperative mode this is
         # UNCONDITIONAL — even while worried — so a brief fast-poll during real
@@ -503,6 +614,96 @@ class Monitor:
             while slept < remaining and not self.paused:
                 await asyncio.sleep(min(2.0, remaining - slept))
                 slept += 2.0
+                # Queued API commands are handled between polls so a remote
+                # "run program 3" lands within a couple of seconds.
+                try:
+                    await self._process_commands()
+                except Exception as e:
+                    print(f"[monitor] command processing failed: {e}")
+
+    # ---- live state + command queue (what the open-data API sees) ----------
+    def live_snapshot(self) -> dict:
+        """The latest reading per device as a plain, address-free dict."""
+        devs = {}
+        for name, c in self.clients.items():
+            s = self.latest.get(name)
+            m = self.meta.get(name, {})
+            devs[name] = {
+                "role": m.get("role", ""),
+                "model": m.get("model", ""),
+                "unit": getattr(c, "unit", "°"),
+                "connected": bool(s and s.connected),
+                "pv": s.pv if s else None,
+                "sp": s.sp if s else None,
+                "output_pct": s.output_pct if s else None,
+                "running": bool(getattr(s, "running", False)) if s else False,
+                "active_program": s.active_program if s else None,
+                "active_segment": s.active_segment if s else None,
+                "watchdog": {
+                    "worried": name in self.worried,
+                    "armed": self.recovery_armed.get(name, True),
+                    "needs_human": bool(getattr(self._watch.get(name), "needs_human", False)),
+                },
+            }
+        return {
+            "schema": "novus-kiln-live/1",
+            "updated_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "last_poll_utc": (datetime.fromtimestamp(self.last_poll_at, timezone.utc)
+                              .isoformat(timespec="seconds") if self.last_poll_at else None),
+            "poll_interval_s": self.poll_interval_s,
+            "paused": self.paused,
+            "devices": devs,
+        }
+
+    def _write_live(self) -> None:
+        """Publish live.json for the API (atomic replace; best-effort)."""
+        try:
+            LIVE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            tmp = LIVE_PATH.with_suffix(".tmp")
+            tmp.write_text(json.dumps(self.live_snapshot(), indent=2))
+            os.replace(tmp, LIVE_PATH)
+        except Exception as e:
+            print(f"[monitor] live.json write failed: {e}")
+
+    async def _process_commands(self) -> None:
+        """Execute queued commands (see commands.py). Each runs through the
+        same control() path as a UI button, including the read-only guard."""
+        for cmd in cmdq.pending(COMMANDS_DIR):
+            cid, name, action = cmd["id"], cmd.get("device"), cmd.get("action")
+            args = cmd.get("args") or {}
+            cmdq.update(COMMANDS_DIR, cid, status="running")
+            try:
+                if name not in self.clients:
+                    raise KeyError(f"unknown device '{name}'")
+                if action == "poll":
+                    await self._poll_once()
+                    result = self.live_snapshot()["devices"].get(name)
+                elif action == "run_program":
+                    n = int(args["program"])
+                    await self.control(name, "run_program", n)
+                    cfg = self.watchdogs.get(name)
+                    self.recovery_armed[name] = (cfg is None or cfg.hold_program == n)
+                    result = {"running_program": n}
+                elif action == "stop_program":
+                    await self.control(name, "stop_program")
+                    self.recovery_armed[name] = False   # don't fight a remote stop
+                    result = {"stopped": True}
+                elif action == "set_manual_setpoint":
+                    sp = float(args["setpoint"])
+                    await self.control(name, "set_manual_setpoint", sp)
+                    self.recovery_armed[name] = False
+                    result = {"setpoint": sp}
+                else:
+                    raise ValueError(f"unknown action '{action}'")
+                self._log_event(name, f"API command {action} {args} → ok ({cmd.get('source')})")
+                cmdq.update(COMMANDS_DIR, cid, status="done", result=result)
+            except PermissionError as e:
+                cmdq.update(COMMANDS_DIR, cid, status="rejected", error=str(e))
+            except Exception as e:
+                if name:
+                    self._log_event(name, f"API command {action} {args} FAILED: {e}")
+                cmdq.update(COMMANDS_DIR, cid, status="failed", error=str(e))
+        cmdq.prune(COMMANDS_DIR)
 
     # ---- logging -----------------------------------------------------------
     def _append_log(self, name: str, state: ControllerState):

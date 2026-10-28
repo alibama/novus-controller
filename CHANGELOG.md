@@ -3,7 +3,80 @@
 All notable changes to this project are documented here. This project follows
 [Semantic Versioning](https://semver.org/) loosely.
 
-## [Unreleased]
+## [2.0.0] — 2026-10-27
+
+A streamlining pass: one-line install, device search as a first-class page,
+no assumptions about the shop, an API that other apps can write to, and a
+Learn page.
+
+### Added
+- **`install.sh`** — one-line install *and* update
+  (`curl … | bash`): apt deps, clone/pull, venv, generated dashboard
+  passphrase and API token, bluetooth group, systemd services for the
+  dashboard and the API. Re-running updates through the validated
+  `deploy/update.sh` path. Optional `Dockerfile` + `docker-compose.yml`.
+- **Devices page** (`pages/1_Devices.py`): Bluetooth scan that classifies any
+  Novus-looking advertisement (MAC prefix, manufacturer id, service UUID, or a
+  model-like name) and says why; **Identify** reads the device identification
+  (vendor / product code / firmware) over Modbus MEI type 14; add by scan or
+  by address; a one-line *Which one is the furnace?* picker; per-device model,
+  role (furnace / kiln / **other** = monitor only), hold target, rated kW and
+  an *Allow writes* switch. Changes apply to the running monitor **live** —
+  no service restart.
+- `novus_models.py`: what we know about the Novus family (N20K48 verified;
+  N1200/N1040/N480D/… recognised, read-only by default) and the scan
+  classifier. `NovusClient.read_device_id()`, `identify()`, `read_pid()`;
+  the client now reads the °C/°F unit register.
+- **Open-data API v2** (`api.py`): `GET /live` (latest reading per controller
+  from `state/live.json`, written by the monitor after every poll),
+  `GET /events`, `GET /notes`, `GET /commands`; **authorized writes** with a
+  bearer token from `api.env`: `POST /notes` and `POST /commands`
+  (`run_program` / `stop_program` / `set_manual_setpoint` / `poll`). Commands
+  go through a file queue (`commands.py`) and are executed by the dashboard's
+  monitor through the same `control()` path as the UI, so read-only
+  controllers reject them and every action lands in `events.log`.
+- **Open Data & API page** (`pages/7_Open_Data.py`): studio name / rate /
+  rated kW, live API health, public URL, token show/regenerate, control
+  switch, the glassdatabase.org hand-off, downloads, and the notes/commands
+  other apps sent.
+- **Learn page** (`pages/6_Learn.py`) + `glass_science.py`: PID and Ramp &
+  Soak explained against the controller's registers (with a live PID read),
+  annealing (why, the thickness table, a calculator that writes a schedule to
+  a slot), fusing/slumping/casting temperatures, heat-work, and the watchdog
+  in plain language.
+- `paths.py`: one data directory (`KILN_DATA_DIR`) for everything the app
+  writes. `.gitignore` (there was none — secrets and device lists could have
+  been committed). `.gitattributes` for LF shell scripts.
+- Tests for the scan classifier, device-id parsing, the registry, the command
+  queue and monitor execution, the read-only guard, live.json, live
+  add/rename/remove, API auth, and the glass-science calculator (76 tests).
+
+### Changed
+- Home page no longer hardcodes a studio name; the title comes from the
+  studio setting. With no devices it walks you to the Devices page. The
+  Open Data panel moved to its own page, and usage rows are cached (they were
+  rebuilt from every log file on every 5-second refresh).
+- Settings page keeps programming/tolerance/notifications/registers/BT
+  sharing/snapshots; scanning and roles moved to Devices, energy settings to
+  Open Data & API. Program writers hide read-only controllers.
+- Watchdog defaults derive from role **and** model: `other` devices and
+  unverified or write-disabled controllers are monitored but never driven.
+- systemd units: dashboard binds `0.0.0.0` (password-gated; LAN access is
+  the point), both units load `notify.env` / `api.env`, API hardened with
+  `Restart=always`. Studio-specific wording removed from unit descriptions.
+- Streamlit's deprecated `use_container_width` replaced by `width="stretch"`;
+  `streamlit>=1.49` pinned. Verified against bleak 3.x.
+
+### Fixed
+- Analytics *Firing summary* tab crashed with `NameError: name` (used an
+  undefined variable for the selected controller).
+- A stray copy of the Analytics page at the repo root was removed.
+- `NovusClient.commit()` referenced an unimported name (would `NameError`)
+  and wrote the OPEN_SESSION register; removed.
+- `reclaim_ble()` no longer force-reconnects every controller (cooperative
+  mode reconnects lazily on the next poll).
+
+## [Unreleased — earlier]
 
 ### Changed (Bluetooth sharing)
 - The monitor now runs in **cooperative mode by default**: it always

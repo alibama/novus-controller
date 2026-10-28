@@ -1,5 +1,5 @@
 bleak>=0.21
-streamlit>=1.30
+streamlit>=1.49
 streamlit-autorefresh>=1.0.1
 pandas>=2.0
 openpyxl>=3.1

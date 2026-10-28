@@ -3,21 +3,37 @@
 # as-is fails with status=217/USER. Use the installer, which fills in this
 # machine's real path and user:   sudo bash deploy/install-services.sh
 #
-# Read-only open-data API (energy + cost + per-device aggregates, CC-BY).
-# Serves NO Bluetooth addresses or secrets. Install:
-#   pip install -r requirements-api.txt
-#   sudo cp deploy/kiln-api.service /etc/systemd/system/
-#   sudo systemctl enable --now kiln-api
+# /etc/systemd/system/kiln-api.service
+#
+# Open-data API (energy + cost + per-device aggregates, CC-BY). Reads serve
+# NO Bluetooth addresses or secrets. Writes (POST endpoints) require the
+# bearer token in api.env (API_WRITE_TOKEN) — see api.env.example.
+#
+# Install: `sudo bash deploy/install-services.sh --with-api --enable`
+# (install.sh does this for you unless you pass --no-api).
+
 [Unit]
-Description=Kiln open-data API (read-only)
+Description=Novus kiln open-data API (FastAPI)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
+Type=simple
 User=youruser
+Group=youruser
 WorkingDirectory=/home/youruser/novus-n20k48-ble
+Environment="PATH=/home/youruser/novus-n20k48-ble/.venv/bin:/usr/local/bin:/usr/bin:/bin"
+# Optional: API_WRITE_TOKEN / API_PUBLIC_URL / API_ALLOW_CONTROL ('-' = skip if missing)
+EnvironmentFile=-/home/youruser/novus-n20k48-ble/api.env
 ExecStart=/home/youruser/novus-n20k48-ble/.venv/bin/uvicorn api:app --host 0.0.0.0 --port 8000
-Restart=on-failure
+
+# Keep it alive no matter what (same policy as the dashboard).
+Restart=always
+RestartSec=10
+StartLimitIntervalSec=0
+
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target

@@ -4,7 +4,7 @@ export_usage.py — emit per-firing energy/cost records for the cost estimator a
 for open-data publishing (drops into the glassdatabase.org importer).
 
     python tools/export_usage.py [--out DIR] [--rate 0.12] [--currency USD] \
-                                 [--studio "Raging Buffalo Glass"]
+                                 [--studio "My Studio"]
 
 Writes kiln_firings.csv and kiln_firings.xlsx (sheet 'kiln_firings' + a
 'data_dictionary' sheet) covering every detected run across all controllers in

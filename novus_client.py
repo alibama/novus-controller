@@ -23,15 +23,18 @@ from bleak import BleakClient
 
 from novus_protocol import (
     FrameAssembler, build_read_registers, build_write_single,
-    build_write_multiple, parse_read_response, to_signed,
+    build_write_multiple, build_read_device_id, parse_read_response,
+    parse_device_id_response, to_signed,
     REG_SETPOINT, REG_PV, REG_OUTPUT_PCT,
     REG_CTRL_AUTO, REG_CTRL_RUN,
     REG_RS_PRN_EXEC, REG_RS_PRN_EDIT, REG_RS_SEG, REG_RS_SEG_TIME,
     REG_RS_TBASE, REG_OPEN_SESSION, REG_DPPO, REG_UNIT,
     REG_SPLL, REG_SPHL,
+    REG_TUNE_AUTO, REG_TUNE_PB, REG_TUNE_IR, REG_TUNE_DT, REG_TUNE_CT,
     program_base, RS_SEGMENTS,
-    FC_READ_REGISTERS, FC_WRITE_SINGLE, FC_WRITE_MULTIPLE,
+    FC_READ_REGISTERS, FC_WRITE_SINGLE, FC_WRITE_MULTIPLE, FC_READ_DEVICE_ID,
 )
+import novus_models
 
 
 # ---------------------------------------------------------------------------
@@ -76,8 +79,8 @@ class ControllerState:
 class NovusClient:
     """One client per controller; one BLE connection held open for the lifetime."""
 
-    SERVICE_UUID = "0783b03e-8535-b5a0-7140-a304d2495cb7"
-    DATA_CHAR    = "0783b03e-8535-b5a0-7140-a304d2495cba"
+    SERVICE_UUID = novus_models.NOVUS_SERVICE_UUID
+    DATA_CHAR    = novus_models.NOVUS_DATA_CHAR
 
     REQUEST_TIMEOUT_S = 3.0
 
@@ -94,6 +97,13 @@ class NovusClient:
         # at connect time, default to 0. Override via
         # `client.decimal_places = 1` if your controller uses 1 DP.
         self.decimal_places = 0
+        # Temperature unit as configured on the controller (register 77):
+        # "°F", "°C", or "°" until read.
+        self.unit = "°"
+        # Device identification (vendor / product code / firmware), filled by
+        # identify() or read_device_id(). model is the short key, e.g. N20K48.
+        self.device_id: dict = {}
+        self.model: str = ""
 
     # ---- BLE plumbing ------------------------------------------------------
 
@@ -106,8 +116,8 @@ class NovusClient:
             return True
         self._client = BleakClient(self.address, timeout=15.0)
         await self._client.connect()
-        try:
-            await self._client._acquire_mtu()
+        try:   # older bleak (<1.0) needed an explicit MTU negotiation on BlueZ
+            await self._client._acquire_mtu()          # type: ignore[attr-defined]
         except Exception:
             pass
         await self._client.start_notify(self.DATA_CHAR, self._on_notify)
@@ -213,9 +223,51 @@ class NovusClient:
         await self._request(build_write_multiple(addr, values),
                             expect_fc=FC_WRITE_MULTIPLE)
 
-    async def commit(self) -> None:
-        """Tell the controller to persist any pending config writes."""
-        await self.write_register(REG_COMMIT, 1)
+    # ---- identification ----------------------------------------------------
+
+    async def read_device_id(self) -> dict:
+        """Ask the controller who it is (Modbus MEI type 14 'Read Device
+        Identification'). Returns {vendor, product, revision, model, objects}
+        and caches it on self.device_id / self.model. Read-only and safe."""
+        frame = await self._request(build_read_device_id(),
+                                    expect_fc=FC_READ_DEVICE_ID)
+        info = parse_device_id_response(frame.payload)
+        info["model"] = novus_models.model_from_text(info.get("product"))
+        self.device_id = info
+        self.model = info["model"]
+        return info
+
+    async def identify(self) -> dict:
+        """Connect (if needed), read the device ID, scaling/unit and a first
+        state reading, and return a plain dict the UI can show for a device
+        that is not in the registry yet. Never writes."""
+        await self.connect()
+        out = {"address": self.address, "vendor": "", "product": "",
+               "revision": "", "model": "", "unit": "", "pv": None, "sp": None,
+               "output_pct": None, "running": None, "error": None}
+        try:
+            out.update({k: v for k, v in (await self.read_device_id()).items()
+                        if k in out})
+        except Exception as e:
+            out["error"] = f"device-id read failed: {e}"
+        try:
+            await self.detect_scaling()
+            out["unit"] = self.unit
+            s = await self.read_state()
+            out.update(pv=s.pv, sp=s.sp, output_pct=s.output_pct,
+                       running=s.running)
+        except Exception as e:
+            out["error"] = (out["error"] + "; " if out["error"] else "") + \
+                           f"state read failed: {e}"
+        return out
+
+    async def read_pid(self) -> dict:
+        """Read the PID tuning block (257..261): autotune, proportional band,
+        integral rate, derivative time, PWM cycle. Read-only."""
+        vals = await self.read_registers(REG_TUNE_AUTO, 5)
+        return {"autotune": vals[0], "proportional_band": vals[1],
+                "integral_rate": vals[2], "derivative_time": vals[3],
+                "cycle_time": vals[4]}
 
     # ---- High-level API used by the dashboard -----------------------------
 
@@ -271,15 +323,21 @@ class NovusClient:
     # ---- decimal point auto-detect ----------------------------------------
 
     async def detect_scaling(self) -> int:
-        """Read INPUT_DPPO (279) and set self.decimal_places accordingly.
-        Returns the detected decimal-place count. Verify against the panel —
-        the protocol doc notes temperature PV may be ×10 regardless of DPPO."""
+        """Read INPUT_DPPO (279) and set self.decimal_places accordingly, and
+        read the unit register (77) to learn °C/°F. Returns the detected
+        decimal-place count. Verify against the panel — the protocol doc notes
+        temperature PV may be ×10 regardless of DPPO."""
         try:
             dppo = (await self.read_registers(REG_DPPO, 1))[0]
             if 0 <= dppo <= 3:
                 self.decimal_places = dppo
         except Exception as e:
             print(f"[{self.name}] detect_scaling failed: {e}")
+        try:
+            unit = (await self.read_registers(REG_UNIT, 1))[0]
+            self.unit = "°F" if unit == 1 else "°C" if unit == 0 else "°"
+        except Exception as e:
+            print(f"[{self.name}] unit read failed: {e}")
         return self.decimal_places
 
     # ---- session / password ------------------------------------------------
@@ -437,6 +495,13 @@ async def _selftest(address: str):
     c = NovusClient("test", address)
     await c.connect()
     print(f"  connected={c.connected}")
+    try:
+        ident = await c.read_device_id()
+        print(f"  {ident['vendor']} · {ident['product']} · fw {ident['revision']}"
+              f" → model {ident['model'] or '?'}")
+    except Exception as e:
+        print(f"  (device-id read failed: {e})")
+    await c.detect_scaling()
     state = await c.read_state()
     print(f"  PV = {state.pv}    SP = {state.sp}    Output = {state.output_pct}%")
     if state.active_program:

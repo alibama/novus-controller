@@ -120,3 +120,77 @@ def test_summary_time_range():
     assert incl["firings"] == 2
     win = c.get("/summary?since=2026-08-01&until=2026-08-20").json()
     assert win["firings"] == 1
+
+
+# ---------------------------------------------------------------------------
+# v2: live state, auth-gated writes, notes, command queue
+# ---------------------------------------------------------------------------
+def test_live_endpoint_serves_monitor_state():
+    c = _make_env()
+    import api
+    r = c.get("/live").json()
+    assert r["devices"] == {} and "note" in r          # nothing written yet
+    (api.DATA_DIR / "state").mkdir(exist_ok=True)
+    (api.DATA_DIR / "state" / "live.json").write_text(json.dumps(
+        {"schema": "novus-kiln-live/1", "updated_utc": "2026-09-10T10:00:00+00:00",
+         "devices": {"furnace": {"pv": 2100, "sp": 2100, "role": "furnace"}}}))
+    r = c.get("/live").json()
+    assert r["devices"]["furnace"]["pv"] == 2100 and r["license"] == "CC-BY-4.0"
+    assert "age_s" in r
+
+
+def test_writes_need_token():
+    c = _make_env()
+    os.environ.pop("API_WRITE_TOKEN", None)
+    body = {"controller": "furnace", "text": "hello"}
+    assert c.post("/notes", json=body).status_code == 503       # no token configured
+    os.environ["API_WRITE_TOKEN"] = "s3cret"
+    assert c.post("/notes", json=body).status_code == 401       # missing
+    assert c.post("/notes", json=body,
+                  headers={"Authorization": "Bearer wrong"}).status_code == 403
+    r = c.post("/notes", json=body, headers={"Authorization": "Bearer s3cret"})
+    assert r.status_code == 201 and r.json()["controller"] == "furnace"
+    assert c.get("/notes").json()["count"] == 1
+    assert c.get("/notes?controller=bubba").json()["count"] == 0
+    assert c.post("/notes", json={"controller": "nope", "text": "x"},
+                  headers={"Authorization": "Bearer s3cret"}).status_code == 404
+    assert c.get("/").json()["write_access"]["enabled"] is True
+
+
+def test_commands_are_queued_and_readable():
+    c = _make_env()
+    import api, commands as cmdq
+    os.environ["API_WRITE_TOKEN"] = "tok"
+    os.environ["API_ALLOW_CONTROL"] = "1"
+    h = {"Authorization": "Bearer tok"}
+    r = c.post("/commands", json={"controller": "bubba", "action": "run_program",
+                                  "program": 3, "source": "test"}, headers=h)
+    assert r.status_code == 202
+    cid = r.json()["id"]
+    assert r.json()["status"] == "pending" and "address" not in r.json()
+    assert c.get(f"/commands/{cid}").json()["args"] == {"program": 3}
+    assert cmdq.pending(api.COMMANDS_DIR)[0]["id"] == cid
+    assert c.get("/commands").json()["commands"][0]["id"] == cid
+    assert c.post("/commands", json={"controller": "bubba", "action": "run_program"},
+                  headers=h).status_code == 422                 # missing program
+    assert c.post("/commands", json={"controller": "bubba", "action": "nuke"},
+                  headers=h).status_code == 422
+    os.environ["API_ALLOW_CONTROL"] = "0"
+    assert c.post("/commands", json={"controller": "bubba", "action": "stop_program"},
+                  headers=h).status_code == 403
+    assert c.post("/commands", json={"controller": "bubba", "action": "poll"},
+                  headers=h).status_code == 202                 # reads still fine
+    assert c.get("/commands/nope").status_code == 404
+
+
+def test_events_endpoint_and_no_address_leak_v2():
+    c = _make_env()
+    import api
+    d = api.LOG_DIR / "furnace"
+    (d / "events.log").write_text("2026-09-10T11:00:00+00:00\tRECOVERY START: PV 1900\n")
+    ev = c.get("/events?controller=furnace").json()
+    assert ev["count"] == 1 and "RECOVERY" in ev["events"][0]["event"]
+    blob = c.get("/live").text + c.get("/events").text + c.get("/devices").text
+    assert "00:26:A4" not in blob and "AA:BB:CC" not in blob
+    devs = c.get("/devices").json()["devices"]
+    assert devs[0]["model"] == "N20K48" and devs[0]["verified"] is True
