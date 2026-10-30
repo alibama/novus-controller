@@ -159,3 +159,55 @@ def test_stopped_kiln_not_restarted_when_not_keep_hot():
     ws = m._watch["furnace"]; ws.low_since = time.time() - 9999
     watch(m, state(300, False, 0))              # finished/stopped and cool
     assert ("run", 1) not in c.log
+
+
+# ---------------------------------------------------------------------------
+# v2.1: window-based trend + over-temperature guard
+# ---------------------------------------------------------------------------
+def test_slow_heatup_is_not_a_cant_hold_fault():
+    # 30 s polls gaining 1-2° each: the old per-poll test alternated between
+    # "rising" and "not rising" and alerted/restarted. Over a window it's rising.
+    m, c = make(); ws = m._watch["furnace"]          # default 120 s confirm
+    pv = 1500.0
+    for i in range(12):
+        pv += 1.0 if i % 2 else 2.0
+        watch(m, state(pv, True, 100))
+        # age the trend samples so the window spans several minutes
+        ws.trend = type(ws.trend)(((t - 30, p) for t, p in ws.trend), maxlen=64)
+        ws.low_since = (ws.low_since or time.time()) - 30
+    assert c.log == []                              # never restarted
+    assert ws.last_alerted_case == "recovering_self"
+
+
+def test_overtemp_stuck_output_alerts_but_does_not_restart():
+    m, c = make(overtemp_confirm_s=0); ws = m._watch["furnace"]
+    events = []
+    m._log_event = lambda n, msg: events.append(msg)
+    # PV way above SP with output 0 and holding steady → stuck output stage
+    for _ in range(3):
+        watch(m, ControllerState(name="furnace", address="x", connected=True,
+                                 pv=1271, sp=895, output_pct=0, running=True,
+                                 active_program=2))
+    assert c.log == []                              # no stop/run
+    assert any("CUT ELEMENT POWER" in e for e in events)
+    assert "furnace" in m.worried
+
+
+def test_overtemp_while_driving_stops():
+    m, c = make(overtemp_confirm_s=0); ws = m._watch["furnace"]
+    watch(m, ControllerState(name="furnace", address="x", connected=True,
+                             pv=2400, sp=2100, output_pct=60, running=True,
+                             active_program=1))
+    assert "stop" in c.log and ws.needs_human
+
+
+def test_crash_cool_is_not_overtemp():
+    # SP stepped from 1465 to 900; PV lags above it but is FALLING with output 0.
+    m, c = make(overtemp_confirm_s=0); ws = m._watch["furnace"]
+    events = []
+    m._log_event = lambda n, msg: events.append(msg)
+    for pv in (1460, 1440, 1415, 1390):
+        watch(m, ControllerState(name="furnace", address="x", connected=True,
+                                 pv=pv, sp=900, output_pct=0, running=True,
+                                 active_program=3))
+    assert not any("ABOVE setpoint" in e for e in events) and c.log == []

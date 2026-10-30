@@ -110,3 +110,44 @@ def test_live_add_rename_remove_device():
     assert m.latest["annealer"].pv == 1200
     _run(m.remove_device("annealer"))
     assert not m.clients and "annealer" not in m.latest
+
+
+def test_diagnose_command_returns_findings():
+    tmp, M = _env()
+
+    class DiagClient(FakeClient):
+        async def read_registers(self, addr, count=1):
+            regs = {51: 3, 77: 0, 200: 896, 201: 890, 202: 100, 213: 1, 214: 1,
+                    221: 1200, 225: 1000, 247: 1, 279: 0}
+            return [regs.get(addr + i, 0) for i in range(count)]
+
+    c = DiagClient("k")
+    m = M.Monitor({"k": c}, {})
+    m.writable["k"] = False                        # read-only must still diagnose
+    cmdq.enqueue(M.COMMANDS_DIR, "k", "diagnose", {"setpoint": 1465})
+    _run(m._process_commands())
+    got = cmdq.recent(M.COMMANDS_DIR)[0]
+    assert got["status"] == "done"
+    r = got["result"]
+    assert r["writes_blocked"] and r["unit"] == "°C"
+    texts = " ".join(f["text"] for f in r["findings"])
+    assert "password" in texts and "outside the setpoint limits" in texts
+
+
+def test_password_opens_session_before_writes():
+    tmp, M = _env()
+
+    class PwClient(FakeClient):
+        async def open_session(self, pw): self.log.append(("open", pw))
+
+    c = PwClient("k")
+    m = M.Monitor({"k": c}, {})
+    m.passwords["k"] = 1111
+    _run(m.control("k", "run_program", 2))
+    assert c.log[:2] == [("open", 1111), ("run", 2)]
+    c.log.clear()
+    _run(m.control("k", "read_state"))             # a read: no session opened
+    assert ("open", 1111) not in c.log
+    m.passwords["k"] = None
+    _run(m.control("k", "stop_program"))           # no password: no session
+    assert c.log == ["stop"]

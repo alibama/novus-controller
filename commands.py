@@ -20,6 +20,8 @@ Allowed actions and their arguments:
   stop_program         {}
   set_manual_setpoint  {"setpoint": float}
   poll                 {}            (take a fresh reading now)
+  diagnose             {"setpoint": float?}  (read-only health check; result
+                                              holds findings + register values)
 """
 from __future__ import annotations
 
@@ -35,6 +37,8 @@ ALLOWED_ACTIONS = {
     "stop_program": (),
     "set_manual_setpoint": ("setpoint",),
     "poll": (),
+    "diagnose": (),      # read-only: protection/unit/mode/limits/program/PID,
+                         # optional "setpoint" arg = the value you wanted to write
 }
 WRITE_ACTIONS = {"run_program", "stop_program", "set_manual_setpoint"}
 TERMINAL = {"done", "failed", "rejected"}

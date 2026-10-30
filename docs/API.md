@@ -42,6 +42,7 @@ toggles control commands (restart `kiln-api` after changing them).
 | `GET /firings.csv` | the same data as CSV |
 | `GET /summary` | totals plus rollups `by_controller` and `by_month`. Filters: `since`, `until` (date `YYYY-MM-DD` or ISO; a bare `until` date includes the whole day) |
 | `GET /devices` | per-device aggregates: name, role, **model**, verified, rated kW, firings, kWh, cost — no addresses |
+| `GET /telemetry/{controller}` | raw logged samples: `time_utc, pv, sp, output_pct, program, segment, connected`. Filters: `since`, `until` (ISO or bare date; default last 24 h), `limit` |
 | `GET /events` | watchdog / audit trail (detections, restarts, API commands). Filters: `controller`, `limit` |
 | `GET /notes` | notes posted via the API. Filters: `controller`, `limit` |
 | `GET /commands` | recent queued commands and their status |
@@ -102,6 +103,16 @@ curl -X POST http://kilnbox:8000/commands \
 | `stop_program` | — | clear the run flag (disarms auto-recovery on that device) |
 | `set_manual_setpoint` | `setpoint` | hold a fixed setpoint, no program (disarms auto-recovery) |
 | `poll` | — | take a fresh reading now (allowed even with `API_ALLOW_CONTROL=0`) |
+| `diagnose` | optional `setpoint` | read-only health check: protection/password, unit, decimal point, auto/manual, run, setpoint & output limits, selected program, PID terms — returned as plain-language `findings` plus raw `values` in the command's `result`. Pass the setpoint you wanted to write and it tells you if limits would clamp it. Allowed with control disabled |
+
+A typical remote diagnosis:
+
+```bash
+ID=$(curl -s -X POST http://shop:8000/commands -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"controller":"freezy2","action":"diagnose","setpoint":896}' | jq -r .id)
+sleep 5; curl -s http://shop:8000/commands/$ID | jq .result
+```
 
 The API does not touch Bluetooth. It writes `commands/<id>.json` with
 `status: pending`; the dashboard's monitor — the only process that owns the

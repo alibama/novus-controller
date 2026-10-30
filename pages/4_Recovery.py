@@ -121,11 +121,19 @@ for dev in devices:
             if st.button("Apply override", key=f"ovrgo_{dev.name}_{_uid}", type="primary"):
                 with st.spinner("Grabbing Bluetooth and setting…"):
                     try:
-                        bridge.call(monitor.control(dev.name, "set_manual_setpoint",
-                                                    float(tgt)), timeout=30)
+                        r = bridge.call(monitor.control(dev.name, "set_manual_setpoint",
+                                                        float(tgt)), timeout=30)
                         monitor.recovery_armed[dev.name] = False
-                        st.success(f"Holding {int(tgt)}° manually. Auto-recovery "
-                                   "disarmed — Re-arm when you go back to program 1.")
+                        if isinstance(r, dict) and r.get("clamped"):
+                            st.error(f"Asked for {int(tgt)}° but the controller now "
+                                     f"reads SP {r.get('actual')}. It ignored or clamped "
+                                     "the write — a password-protected controller, or "
+                                     "setpoint limits. Run **Diagnose** on the Devices "
+                                     "page to see which.")
+                        else:
+                            st.success(f"Holding {int(tgt)}° manually (confirmed by "
+                                       "read-back). Auto-recovery disarmed — Re-arm "
+                                       "when you go back to program 1.")
                     except Exception as e:
                         st.error(f"override failed: {e}")
 
@@ -199,6 +207,22 @@ for dev in devices:
                     "Low margin °F (if no trigger set)", value=float(cfg.low_margin),
                     step=10.0, key=f"lm_{dev.name}_{_uid}")
 
+                i1, i2, i3 = st.columns(3)
+                cfg.high_margin = i1.number_input(
+                    "Over-temp margin °F", value=float(cfg.high_margin), step=10.0,
+                    key=f"hm_{dev.name}_{_uid}",
+                    help="PV this far ABOVE the live setpoint = over-temperature. "
+                         "Output ~0% and not falling → stuck SSR/contactor alert "
+                         "(software can't fix it). Output still high → STOP + alert.")
+                cfg.overtemp_confirm_s = i2.number_input(
+                    "Over-temp confirm (s)", value=float(cfg.overtemp_confirm_s),
+                    step=30.0, key=f"oc_{dev.name}_{_uid}")
+                cfg.trend_window_s = i3.number_input(
+                    "Trend window (s)", value=float(cfg.trend_window_s), step=30.0,
+                    key=f"tw_{dev.name}_{_uid}",
+                    help="'Is it climbing?' is judged over this window, so a slow "
+                         "heat-up isn't mistaken for a can't-hold fault.")
+
                 if st.button("💾 Save this controller's logic", key=f"sv_{dev.name}_{_uid}",
                              type="primary"):
                     monitor.recover_threshold[dev.name] = float(new_thr)
@@ -216,7 +240,7 @@ import pathlib
 picked = st.selectbox("Controller", [d.name for d in devices], key="evt_dev")
 evt = pathlib.Path(core.LOG_DIR) / picked / "events.log"
 if evt.exists():
-    lines = evt.read_text().splitlines()[-40:]
+    lines = evt.read_text(encoding="utf-8", errors="replace").splitlines()[-40:]
     st.code("\n".join(lines) or "(empty)", language="text")
 else:
     st.caption("No events logged yet.")

@@ -315,7 +315,8 @@ WATCHDOG_FIELDS = [
     "enabled", "auto_recover", "expected_setpoint", "low_margin", "hold_program",
     "keep_hot", "dropout_confirm_s", "cant_hold_confirm_s", "sustain_s",
     "recover_floor", "confirm_after_s", "confirm_rise", "max_recoveries",
-    "recover_on_cant_hold",
+    "recover_on_cant_hold", "high_margin", "overtemp_confirm_s",
+    "trend_window_s", "trend_rise",
 ]
 
 
@@ -429,6 +430,7 @@ def get_monitor(_bridge: AsyncBridge, _clients: dict) -> Monitor:
                 cooperative=_monitor_setting("cooperative", True))
     for d in devs:
         m.writable[d.name] = bool(d.writes_allowed)
+        m.passwords[d.name] = d.password_int
         m.meta[d.name] = device_meta(d)
     m.start(_bridge.loop)
     return m
@@ -475,9 +477,10 @@ def reload_devices(bridge, clients, monitor) -> list[Device]:
             c = NovusClient(d.name, d.address)
             clients[d.name] = c
             monitor.add_device(c, watchdog_for(d), writable=d.writes_allowed,
-                               meta=device_meta(d))
+                               meta=device_meta(d), password=d.password_int)
         else:
             monitor.writable[d.name] = bool(d.writes_allowed)
+            monitor.passwords[d.name] = d.password_int
             monitor.meta[d.name] = device_meta(d)
             cfg = monitor.watchdogs.get(d.name)
             fresh = watchdog_for(d)

@@ -49,6 +49,14 @@ class Device:
     firmware: str = ""              # firmware revision read from the device
     product: str = ""               # full product code string from the device
     writes_allowed: bool = True     # False = this app will only READ from it
+    password: str = ""              # controller password (PAS on the panel;
+                                    # factory default 1111). Sent to register 53
+                                    # before every write when set.
+
+    @property
+    def password_int(self):
+        p = (self.password or "").strip()
+        return int(p) if p.isdigit() else None
 
     @property
     def is_furnace(self) -> bool:

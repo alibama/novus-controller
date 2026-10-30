@@ -56,6 +56,10 @@ Then open `http://<that-machine>:8501`, enter the passphrase, and go to
   auto-recovered), **kiln** (runs programs), or **other** (monitor only). A
   one-line *Which one is the furnace?* picker covers the common case.
 - Unverified models stay **read-only** until you flip *Allow writes*.
+- **Diagnose** reads protection, unit, mode, limits, program and PID terms
+  and says in plain words why a write won't stick (password, °C, manual mode,
+  setpoint limits) or why it's running hot (output off but PV climbing →
+  stuck SSR). A per-device controller password unlocks protected units.
 - Changes apply to the running monitor immediately — no restart.
 
 **Watch and control** — *Home* page
@@ -67,7 +71,10 @@ Then open `http://<that-machine>:8501`, enter the passphrase, and go to
 - **Furnace watchdog**: if a furnace stays below your trigger temperature it
   does the same stop/start you'd do by hand, confirms the climb, and alerts
   you (Telegram / ntfy / Twilio SMS) — with guards so it never drives output
-  on an implausible reading. Every threshold is editable on *Recovery & Logic*.
+  on an implausible reading. An **over-temperature guard** alerts hard when
+  a kiln sits far above setpoint with output off (a stuck SSR: cut power) and
+  stops a controller that is still driving. Every threshold is editable on
+  *Recovery & Logic*.
 
 **Program it** — *Settings* page
 - Write standard schedules (hold, anneal-down, full/tack fuse, slump, casting,
@@ -114,9 +121,10 @@ Bluetooth address or a secret**. Writes need `Authorization: Bearer <token>`
 | GET | `/summary` | totals and rollups — the glassdatabase.org contract |
 | GET | `/firings`, `/firings.csv` | one row per firing: energy, cost, heat-work |
 | GET | `/devices` | per-controller aggregates and model |
+| GET | `/telemetry/{controller}` | raw logged samples (PV, SP, output, program) |
 | GET | `/events`, `/notes`, `/commands` | audit trail, notes, queued commands |
 | POST | `/notes` | attach a note to a controller or firing |
-| POST | `/commands` | queue `run_program` / `stop_program` / `set_manual_setpoint` / `poll` |
+| POST | `/commands` | queue `run_program` / `stop_program` / `set_manual_setpoint` / `poll` / `diagnose` |
 
 Commands are executed by the dashboard's monitor (the only process that owns
 the Bluetooth radio) within a few seconds, through the same safety rules as

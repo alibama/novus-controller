@@ -3,6 +3,53 @@
 All notable changes to this project are documented here. This project follows
 [Semantic Versioning](https://semver.org/) loosely.
 
+## [2.1.0] — 2026-10-30
+
+Driven by a real incident: a kiln ran ~375 °F above its program with the
+controller commanding almost no power, and the replacement controller
+"wouldn't take" a setpoint.
+
+### Added
+- **Diagnose** (`diagnose.py`): reads protection, unit, decimal point,
+  auto/manual, run flag, setpoint and output limits, selected program and PID
+  terms, and explains them in plain words — why a write won't stick, that the
+  controller is in °C, that it's in manual mode, that PV is far above SP with
+  output off (stuck SSR). Available as a button per device on the Devices page,
+  as the API command `diagnose` (read-only, allowed even with
+  `API_ALLOW_CONTROL=0`), and from `monitor.diagnose_now()`.
+- `GET /telemetry/{controller}` — raw logged samples (PV, SP, output, program,
+  segment, connected) with `since`/`until`/`limit`, so a remote reader can see
+  what the dashboard's charts see.
+- **Per-device controller password** (Devices page). When set, every write
+  path — RUN, STOP, manual override, program/register writers, API commands —
+  opens a session (register 53) first. Protected controllers silently rejected
+  writes before.
+- **Over-temperature guard** in the watchdog: PV more than `high_margin`
+  (150 °F) above the live setpoint for `overtemp_confirm_s`. With output ~0 %
+  and not falling → urgent "cut element power" alert, repeated every 15 min
+  (a stuck SSR can't be fixed in software). With output still high → stop the
+  controller and call a human. A crash-cool (PV lagging above a stepped-down
+  SP, but falling) is explicitly not a fault. Editable on Recovery & Logic.
+- Devices page warns loudly when a controller reports °C.
+
+### Changed
+- The manual setpoint override now stops, **clears the selected program**
+  (247 := 0), writes SP, sets auto, runs, and **reads the setpoint back**;
+  the UI and the API command report when the controller ignored or clamped
+  it. Previously, with a program selected, run=1 restarted the program and
+  its setpoint overwrote the override within a second.
+- Watchdog trend detection ("is it climbing on its own?") now looks across a
+  5-minute window instead of two consecutive 30-second polls. A slow cold
+  start gaining 1–2 ° per poll was being alerted every minute as "output
+  pinned but not holding" and, when armed, could be restarted and then
+  stopped for "not recovering".
+
+### Fixed
+- Analytics *Firing summary* crashed under pandas 3 (`Length of values (0)
+  does not match length of index`) when no rated kW was set: `groupby.apply`
+  drops `None` results. Replaced with a plain loop.
+- Event log is written and read as UTF-8 explicitly.
+
 ## [2.0.0] — 2026-10-27
 
 A streamlining pass: one-line install, device search as a first-class page,

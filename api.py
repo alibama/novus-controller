@@ -152,13 +152,15 @@ def index():
                             "filters: since, until (date or ISO; until is "
                             "inclusive of the whole day)",
             "GET /devices": "per-device aggregates and model (no addresses)",
+            "GET /telemetry/{controller}": "raw logged samples (PV/SP/output/"
+                                           "program). filters: since, until, limit",
             "GET /events": "watchdog/audit events. filters: controller, limit",
             "GET /notes": "notes posted via the API. filters: controller, limit",
             "GET /commands": "recent queued commands and their status",
             "GET /commands/{id}": "one command's status",
             "POST /notes": "(bearer token) attach a note to a controller/firing",
             "POST /commands": "(bearer token) queue run_program / stop_program / "
-                              "set_manual_setpoint / poll for a controller",
+                              "set_manual_setpoint / poll / diagnose for a controller",
             "GET /health": "liveness check",
             "GET /docs": "interactive OpenAPI docs",
         },
@@ -285,6 +287,45 @@ def summary(since: str | None = Query(None, description="lower bound, date or IS
     }
 
 
+@app.get("/telemetry/{controller}")
+def telemetry(controller: str,
+              since: str | None = Query(None, description="ISO start (default: 24 h ago)"),
+              until: str | None = Query(None, description="ISO end (default: now)"),
+              limit: int = Query(5000, ge=1, le=100000)):
+    """Raw logged samples for one controller: timestamp, PV, SP, output %,
+    program, segment, connected. What the dashboard's charts are drawn from.
+    Address-free (the CSVs never contain one)."""
+    if controller not in _known_names():
+        raise HTTPException(404, f"unknown controller '{controller}'")
+    from datetime import timedelta
+    now = datetime.now(timezone.utc)
+    s = since or (now - timedelta(hours=24)).isoformat(timespec="seconds")
+    u = until or now.isoformat(timespec="seconds")
+    rows = runs_mod.load_telemetry_window(LOG_DIR, controller, s, u)
+    if not rows and (since or until):
+        # a bare date is a common way to ask; widen it to the whole day(s)
+        if since and len(since) == 10:
+            s = since + "T00:00:00+00:00"
+        if until and len(until) == 10:
+            u = until + "T23:59:59+00:00"
+        rows = runs_mod.load_telemetry_window(LOG_DIR, controller, s, u)
+    out = []
+    for r in rows[-limit:]:
+        def num(k):
+            v = r.get(k, "")
+            try:
+                return float(v) if v not in ("", None) else None
+            except Exception:
+                return None
+        out.append({"time_utc": r.get("timestamp_utc"), "pv": num("pv"), "sp": num("sp"),
+                    "output_pct": num("output_pct"),
+                    "program": int(num("active_program") or 0),
+                    "segment": int(num("active_segment") or 0),
+                    "connected": bool(int(num("connected") or 0))})
+    return {"controller": controller, "since": s, "until": u, "count": len(out),
+            "license": LICENSE, "samples": out}
+
+
 @app.get("/devices")
 def devices_endpoint():
     """Per-device rollups. Deliberately omits BLE addresses."""
@@ -324,7 +365,7 @@ def events(controller: str | None = Query(None), limit: int = Query(100, ge=1, l
         p = LOG_DIR / name / "events.log"
         if not p.exists():
             continue
-        for line in p.read_text().splitlines():
+        for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
             ts, _, msg = line.partition("\t")
             out.append({"controller": name, "time_utc": ts, "event": msg})
     out.sort(key=lambda e: e["time_utc"], reverse=True)
@@ -377,7 +418,7 @@ def post_note(note: NoteIn, _: str = Depends(require_token)):
 # ---------------------------------------------------------------------------
 class CommandIn(BaseModel):
     controller: str
-    action: str = Field(..., description="run_program | stop_program | set_manual_setpoint | poll")
+    action: str = Field(..., description="run_program | stop_program | set_manual_setpoint | poll | diagnose")
     program: int | None = Field(None, ge=1, le=20)
     setpoint: float | None = None
     source: str | None = Field(None, max_length=120, description="who/what is asking (for the audit log)")

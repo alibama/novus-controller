@@ -127,6 +127,24 @@ class WatchdogConfig:
     settle_s: float = 600.0               # after a confirmed recovery, don't re-cycle
                                           # for this long (let it climb back)
 
+    # --- trend detection ---
+    # "Is it climbing on its own?" is judged over a WINDOW, not between two
+    # consecutive 30-second polls: a slow heat-up gains ~1° per poll, which a
+    # per-poll test reads as "not rising" every other time and then mislabels
+    # a normal cold start as an output-stage fault.
+    trend_window_s: float = 300.0         # look back this far
+    trend_rise: float = 3.0               # ...and call it rising above this gain
+
+    # --- OVER-temperature guard ---
+    # PV well above the live setpoint is never normal. With output at ~0% the
+    # controller is not asking for the heat → the output stage (SSR/contactor)
+    # is stuck ON and only cutting power will help: alert hard, repeatedly.
+    # With output still high it's the controller (manual mode / tuning / wrong
+    # input type) → stop it and call a human.
+    high_margin: float = 150.0            # PV > SP + this  → over-temp
+    overtemp_confirm_s: float = 180.0     # ...sustained this long
+    overtemp_alert_every_s: float = 900.0 # repeat the stuck-output alert this often
+
 
 @dataclass
 class _WatchState:
@@ -142,6 +160,9 @@ class _WatchState:
     settle_until: float = 0.0
     last_alerted_case: Optional[str] = None
     needs_human: bool = False
+    trend: deque = field(default_factory=lambda: deque(maxlen=64))  # (t, pv)
+    high_since: Optional[float] = None
+    last_overtemp_alert: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -202,6 +223,10 @@ class Monitor:
         # not been verified on is READ-ONLY until the operator opts in; any
         # control()/write path refuses otherwise. Missing name => allowed.
         self.writable: dict[str, bool] = {n: True for n in clients}
+        # Per-device controller password (register 53). When set, every write
+        # path opens a session first — protected controllers reject writes
+        # otherwise and the UI just sees "nothing happened".
+        self.passwords: dict[str, Optional[int]] = {n: None for n in clients}
         # Per-device descriptive metadata (role, model) published in live.json
         # so API consumers can label readings. Set by the app from devices.json.
         self.meta: dict[str, dict] = {n: {} for n in clients}
@@ -223,7 +248,8 @@ class Monitor:
 
     # ---- live device set (no restart needed) --------------------------------
     def add_device(self, client: NovusClient, watchdog: Optional[WatchdogConfig] = None,
-                   writable: bool = True, meta: Optional[dict] = None) -> None:
+                   writable: bool = True, meta: Optional[dict] = None,
+                   password: Optional[int] = None) -> None:
         """Start monitoring another controller. Safe while running: the new
         entry is picked up on the next poll cycle."""
         name = client.name
@@ -236,6 +262,7 @@ class Monitor:
         self._unreachable.setdefault(name, 0)
         self.recovery_armed.setdefault(name, True)
         self.writable[name] = bool(writable)
+        self.passwords[name] = password
         self.meta[name] = dict(meta or {})
 
     async def remove_device(self, name: str) -> None:
@@ -251,7 +278,7 @@ class Monitor:
             for d in (self.watchdogs, self.programs, self.request_programs,
                       self._watch, self._unreachable, self.recovery_armed,
                       self.recover_threshold, self.writable, self.meta,
-                      self.latest, self._last_unreach_log):
+                      self.passwords, self.latest, self._last_unreach_log):
                 d.pop(name, None)
             self.worried.discard(name)
 
@@ -261,8 +288,8 @@ class Monitor:
             return
         for d in (self.clients, self.watchdogs, self.programs, self.request_programs,
                   self._watch, self._unreachable, self.recovery_armed,
-                  self.recover_threshold, self.writable, self.meta, self.latest,
-                  self._last_unreach_log):
+                  self.recover_threshold, self.writable, self.meta, self.passwords,
+                  self.latest, self._last_unreach_log):
             if old in d:
                 d[new] = d.pop(old)
         self.clients[new].name = new
@@ -390,6 +417,7 @@ class Monitor:
             if not c.connected:
                 await c.connect()
                 await c.detect_scaling()
+            await self._open_session_if_needed(name, action)
             method = getattr(c, action)
             result = await method(*args)
             # Re-read so the dashboard shows the new state without waiting 5 min.
@@ -414,6 +442,33 @@ class Monitor:
                 f"{name} is read-only in this app (its controller model is not "
                 f"verified). Enable writes for it on the Devices page first.")
 
+    async def _open_session_if_needed(self, name: str, action: str,
+                                      password: Optional[int] = None) -> None:
+        """Protected controllers reject every write until the password is
+        written to register 53. Do that before any write action when a
+        password is known for the device (explicit one wins)."""
+        pw = password if password is not None else self.passwords.get(name)
+        if pw is None or action not in self.WRITE_ACTIONS or action == "open_session":
+            return
+        try:
+            await self.clients[name].open_session(int(pw))
+        except Exception as e:
+            print(f"[monitor] {name} open_session failed: {e}")
+
+    async def diagnose_now(self, name: str, wanted_sp: Optional[float] = None) -> dict:
+        """Read the explain-everything registers (protection, unit, mode,
+        limits, program, PID) and return plain-language findings. Read-only."""
+        import diagnose as _dx
+        async with self._poll_lock:
+            c = self.clients[name]
+            if not c.connected:
+                await c.connect()
+                await c.detect_scaling()
+            report = await _dx.diagnose(c, expected_unit="°F", wanted_sp=wanted_sp)
+            report["device"] = name
+            report["unit_seen"] = getattr(c, "unit", "°")
+            return report
+
     async def write_program_now(self, name, num, segments, tolerance=0.0,
                                 start_setpoint=0.0, link_to=0, password=None):
         """Write a full program into slot `num` RIGHT NOW, then read it back
@@ -430,8 +485,7 @@ class Monitor:
             if not c.connected:
                 await c.connect()
                 await c.detect_scaling()
-            if password is not None:
-                await c.open_session(int(password))
+            await self._open_session_if_needed(name, "write_program", password)
             await c.write_program(num, segments, tolerance=tolerance,
                                   start_setpoint=start_setpoint, link_to=link_to)
             prog = await c.read_program(num)
@@ -482,8 +536,7 @@ class Monitor:
             if not c.connected:
                 await c.connect()
                 await c.detect_scaling()
-            if password is not None:
-                await c.open_session(int(password))
+            await self._open_session_if_needed(name, "write_register", password)
             await c.write_register(int(addr), int(value))
             rb = await c.read_registers(int(addr), 1)
             return rb[0] if rb else None
@@ -690,9 +743,13 @@ class Monitor:
                     result = {"stopped": True}
                 elif action == "set_manual_setpoint":
                     sp = float(args["setpoint"])
-                    await self.control(name, "set_manual_setpoint", sp)
+                    r = await self.control(name, "set_manual_setpoint", sp)
                     self.recovery_armed[name] = False
-                    result = {"setpoint": sp}
+                    result = r if isinstance(r, dict) else {"setpoint": sp}
+                elif action == "diagnose":
+                    result = await self.diagnose_now(
+                        name, wanted_sp=(float(args["setpoint"]) if args.get("setpoint")
+                                         is not None else None))
                 else:
                     raise ValueError(f"unknown action '{action}'")
                 self._log_event(name, f"API command {action} {args} → ok ({cmd.get('source')})")
@@ -733,7 +790,7 @@ class Monitor:
         path = LOG_DIR / name / "events.log"
         path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            with path.open("a") as f:
+            with path.open("a", encoding="utf-8") as f:
                 f.write(f"{datetime.now(timezone.utc).isoformat(timespec='seconds')}\t{msg}\n")
         except Exception as e:
             print(f"[watchdog:{name}] event-log failed: {e}")
@@ -787,15 +844,67 @@ class Monitor:
         out = state.output_pct if state.output_pct is not None else 0.0
         running = bool(getattr(state, "running", False))
         sp = state.sp if state.sp is not None else cfg.expected_setpoint
-        # Trend vs the previous poll: is the temperature climbing on its own?
+        # Trend over a window: is the temperature climbing on its own? Compare
+        # against the oldest reading inside trend_window_s (falling back to
+        # the previous poll when that's all we have).
         prev = ws.prev_pv
         ws.prev_pv = pv
-        rising = (prev is not None) and ((pv - prev) > 1.0)
+        while ws.trend and now - ws.trend[0][0] > cfg.trend_window_s:
+            ws.trend.popleft()
+        ws.trend.append((now, pv))
+        window = [p for _, p in ws.trend]
+        # rising: it has climbed trend_rise above the LOWEST point in the window
+        # (so a dip followed by a climb-back counts as recovering); falling:
+        # it has dropped trend_rise below the HIGHEST point in the window.
+        oldest = window[0] if len(window) > 1 else prev
+        rising = len(window) > 1 and (pv - min(window)) >= cfg.trend_rise
+        falling = len(window) > 1 and (pv - max(window)) <= -cfg.trend_rise
         # Trigger temperature: the UI-set threshold if present, else the
         # config margin below the expected hold.
         low_line = self.recover_threshold.get(name)
         if low_line is None:
             low_line = cfg.expected_setpoint - cfg.low_margin
+
+        # --- OVER-temperature: never normal, checked before anything else ---
+        # A crash-cool (SP steps down, PV lags above it with output 0) is the
+        # one legitimate "PV far above SP" state — and it is FALLING. A stuck
+        # output stage holds or climbs. So the stuck alert needs "not falling".
+        over = pv > sp + cfg.high_margin and sp > 0
+        # With output off we also need a trend (≥2 samples) before judging.
+        cooling_or_unknown = out <= 5.0 and (falling or len(window) < 2)
+        if over and not cooling_or_unknown:
+            ws.high_since = ws.high_since or now
+            if (now - ws.high_since) >= cfg.overtemp_confirm_s:
+                self.worried.add(name)
+                if out <= 5.0:
+                    # Controller isn't asking for heat → output stage stuck ON.
+                    if now - ws.last_overtemp_alert >= cfg.overtemp_alert_every_s:
+                        ws.last_overtemp_alert = now
+                        ws.last_alerted_case = "overtemp_stuck"
+                        alert(f"{name} is {pv - sp:g}° ABOVE setpoint (PV {pv:g}°, "
+                              f"SP {sp:g}°) with output {out:g}%. The controller is "
+                              f"NOT asking for this heat — suspect a shorted SSR / "
+                              f"welded contactor. Software cannot stop it: CUT "
+                              f"ELEMENT POWER at the breaker/contactor now.", "urgent")
+                    return
+                if ws.last_alerted_case != "overtemp_driving":
+                    # Controller is still driving while far too hot → stop it.
+                    ws.last_alerted_case = "overtemp_driving"
+                    ws.needs_human = True
+                    await self._safe_stop(name)
+                    alert(f"{name} is {pv - sp:g}° ABOVE setpoint (PV {pv:g}°, SP "
+                          f"{sp:g}°) and output was still {out:g}%. STOPPED it. "
+                          f"Suspect manual mode, a wrong thermocouple type, or "
+                          f"tuning. Needs a human.", "urgent")
+                return
+        elif over:
+            ws.high_since = None          # cooling on its own: not a fault (yet)
+        else:
+            if ws.last_alerted_case in ("overtemp_stuck", "overtemp_driving"):
+                alert(f"{name} back within {cfg.high_margin:g}° of setpoint "
+                      f"(PV {pv:g}°, SP {sp:g}°).", "default")
+                ws.last_alerted_case = None
+            ws.high_since = None
 
         # Remember the program number whenever it's healthy AND running, so we
         # know what to re-assert if it later drops out.
@@ -903,6 +1012,8 @@ class Monitor:
         if running and out >= 90.0 and rising:
             ws.last_alerted_case = "recovering_self"
             return
+        if running and out >= 90.0 and len(window) < 2:
+            return                                  # no trend yet — can't judge
 
         if not running:
             ready = low_for >= cfg.dropout_confirm_s

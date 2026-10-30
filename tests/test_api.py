@@ -194,3 +194,14 @@ def test_events_endpoint_and_no_address_leak_v2():
     assert "00:26:A4" not in blob and "AA:BB:CC" not in blob
     devs = c.get("/devices").json()["devices"]
     assert devs[0]["model"] == "N20K48" and devs[0]["verified"] is True
+
+
+def test_telemetry_endpoint():
+    c = _make_env()
+    r = c.get("/telemetry/furnace?since=2026-09-10&until=2026-09-10").json()
+    assert r["count"] == 24 and r["samples"][0]["pv"] == 200.0
+    assert r["samples"][-1]["program"] == 1 and r["samples"][-1]["connected"] is True
+    assert c.get("/telemetry/nope").status_code == 404
+    assert "00:26:A4" not in c.get("/telemetry/furnace?since=2026-09-10").text
+    few = c.get("/telemetry/furnace?since=2026-09-10&until=2026-09-10&limit=3").json()
+    assert few["count"] == 3

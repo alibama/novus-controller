@@ -465,18 +465,29 @@ class NovusClient:
         await self.write_register(REG_CTRL_RUN, 0)
         return True
 
-    async def set_manual_setpoint(self, temp: float) -> bool:
-        """Manual override: hold a fixed setpoint in automatic mode, no R&S
-        program. Writes SP (reg 200), automatic mode (213), run (214). Use this
-        to push a furnace to a target on demand or hold a custom temperature.
-        The controller drives its PID toward `temp` and holds until stopped."""
+    async def set_manual_setpoint(self, temp: float) -> dict:
+        """Manual override: hold a fixed setpoint in automatic mode with NO
+        Ramp & Soak program. Sequence: stop (214:=0), deselect any program
+        (247:=0 — otherwise run would restart it and its setpoint would
+        overwrite ours within a second), write SP (200), automatic mode (213),
+        run (214). Then READ THE SETPOINT BACK: a protected controller or one
+        with setpoint limits silently ignores or clamps the write, and the
+        caller must be told. Returns {requested, actual, clamped}."""
         raw = int(round(temp * (10 ** self.decimal_places)))
+        await self.write_register(REG_CTRL_RUN, 0)
+        await asyncio.sleep(0.1)
+        await self.write_register(REG_RS_PRN_EXEC, 0)
+        await asyncio.sleep(0.1)
         await self.write_register(REG_SETPOINT, raw)
         await asyncio.sleep(0.1)
         await self.write_register(REG_CTRL_AUTO, 1)
         await asyncio.sleep(0.1)
         await self.write_register(REG_CTRL_RUN, 1)
-        return True
+        await asyncio.sleep(0.2)
+        rb = await self.read_registers(REG_SETPOINT, 1)
+        actual = self._scale(rb[0]) if rb else None
+        return {"requested": float(temp), "actual": actual,
+                "clamped": (actual is None or abs(actual - temp) > 0.5)}
 
     async def is_running(self) -> int:
         """Return 0 if stopped, else the program number (1..20) being executed."""

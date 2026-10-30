@@ -166,9 +166,10 @@ with tab3:
         ).reset_index(drop=True)
         firings["duration"] = firings["ended"] - firings["started"]
 
-        energies = runs.groupby("run_id")[["timestamp_utc", "output_pct"]].apply(
-            _group_kwh)
-        firings["energy_kwh"] = list(energies.values)
+        # Plain loop rather than groupby.apply: pandas 3 drops groups whose
+        # result is None (no rated kW yet), which left the column short.
+        firings["energy_kwh"] = [_group_kwh(g[["timestamp_utc", "output_pct"]])
+                                 for _, g in runs.groupby("run_id", sort=True)]
         if rate > 0 and power_kw > 0:
             firings["cost"] = firings["energy_kwh"].apply(
                 lambda k: round(k * rate, 2) if k is not None else None)

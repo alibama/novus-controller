@@ -260,6 +260,11 @@ for i, d in enumerate(devs):
                        "**read-only** (monitor and log only) unless you enable "
                        "writes below — then you are testing the register map "
                        "yourself. Reading PV/SP is safe.")
+        if core.unit_of(clients, d.name) == "°C":
+            st.error(f"**{d.name} is set to °C.** The app, its templates and the "
+                     "other controllers assume °F — a hold of 896 on this unit means "
+                     "896 °C (≈1645 °F). Switch it to °F on the front panel before "
+                     "writing any program to it.")
 
         c1, c2, c3, c4 = st.columns([2, 2, 2, 2])
         new_name = c1.text_input("Name", value=d.name, key=f"dn_{i}")
@@ -270,7 +275,7 @@ for i, d in enumerate(devs):
             help="Furnace: the hold the watchdog protects. Kiln: the program-1 "
                  "parking temperature. Other: ignored.")
         new_model = c4.text_input("Model", value=d.model, key=f"dm_{i}")
-        c5, c6, c7 = st.columns([3, 2, 2])
+        c5, c6, c7, c8 = st.columns([3, 2, 2, 2])
         new_addr = c5.text_input(
             "BLE address", value=d.address, key=f"da_{i}",
             help="Swapped the controller? Paste the new MAC — the name and all "
@@ -278,21 +283,44 @@ for i, d in enumerate(devs):
         new_kw = c6.number_input("Rated kW (for energy)", min_value=0.0,
                                  max_value=200.0, value=float(d.power_kw or 0.0),
                                  step=0.5, key=f"dk_{i}")
-        new_wr = c7.toggle("Allow writes (run/stop/program)", value=d.writes_allowed,
-                           key=f"dw_{i}",
+        new_pw = c7.text_input("Controller password", value=d.password or "",
+                               key=f"dp_{i}", type="password",
+                               help="PAS on the front panel (factory default 1111). "
+                                    "When set, the app unlocks the controller "
+                                    "(register 53) before every write — needed on "
+                                    "protected controllers, harmless otherwise.")
+        new_wr = c8.toggle("Allow writes", value=d.writes_allowed, key=f"dw_{i}",
                            help="Off = this app only reads from it.")
         if (new_name != d.name or new_role != d.role or new_sp != d.expected_setpoint
                 or new_model.strip().upper() != d.model
                 or new_addr.strip().upper() != d.address
-                or new_kw != (d.power_kw or 0.0) or new_wr != d.writes_allowed):
+                or new_kw != (d.power_kw or 0.0) or new_wr != d.writes_allowed
+                or new_pw.strip() != (d.password or "")):
             devs[i] = Device(name=new_name.strip(), address=new_addr.strip().upper(),
                              role=new_role, can_be_furnace=(new_role == ROLE_KILN),
                              expected_setpoint=float(new_sp), power_kw=float(new_kw),
                              model=new_model.strip().upper() or "N20K48",
                              firmware=d.firmware, product=d.product,
-                             writes_allowed=bool(new_wr))
+                             writes_allowed=bool(new_wr), password=new_pw.strip())
             changed = True
-        b1, b2, b3 = st.columns([1, 1, 4])
+        b0, b1, b2, b3 = st.columns([1.3, 1, 1, 3])
+        if b0.button("🩺 Diagnose", key=f"diag_{i}", width="stretch",
+                     help="Read protection, unit, mode, limits, program and PID "
+                          "and explain why a write might not stick. Read-only."):
+            with st.spinner("Reading the controller's state…"):
+                try:
+                    rep = bridge.call(monitor.diagnose_now(d.name), timeout=60)
+                    st.session_state[f"diag_{d.address}"] = rep
+                except Exception as e:
+                    st.error(f"diagnose failed: {e}")
+        rep = st.session_state.get(f"diag_{d.address}")
+        if rep:
+            st.markdown(f"**{rep['summary']}**")
+            for fnd in rep["findings"]:
+                {"danger": st.error, "warn": st.warning}.get(fnd["level"], st.info)(fnd["text"])
+            with st.expander("Raw register values"):
+                import diagnose as _dx
+                st.code(_dx.to_text(rep), language="text")
         if b1.button("🔎 Identify", key=f"ident_{i}", width="stretch",
                      help="Read model/firmware from the controller and store it."):
             with st.spinner("Reading device identification…"):
