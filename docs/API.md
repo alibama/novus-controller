@@ -52,7 +52,9 @@ toggles control commands (restart `kiln-api` after changing them).
 
 Written by the dashboard's monitor after every poll (and after every control
 action) to `state/live.json`; the API serves it with an `age_s` field so you
-can tell how fresh it is.
+can tell how fresh it is. `paused` / `paused_until` (top level and per device)
+say when a controller has been handed to QuickTune; `cooperative` and
+`poll_interval_s` describe the read cadence.
 
 ```json
 {
@@ -103,6 +105,8 @@ curl -X POST http://kilnbox:8000/commands \
 | `stop_program` | — | clear the run flag (disarms auto-recovery on that device) |
 | `set_manual_setpoint` | `setpoint` | hold a fixed setpoint, no program (disarms auto-recovery) |
 | `poll` | — | take a fresh reading now (allowed even with `API_ALLOW_CONTROL=0`) |
+| `pause` | optional `minutes` (default 30) | hand the controller to QuickTune: the monitor leaves it alone (no reads, no watchdog) until the deadline, then resumes by itself. `"controller": "all"` pauses everything |
+| `resume` | — | end a pause early (controller or `"all"`) |
 | `diagnose` | optional `setpoint` | read-only health check: protection/password, unit, decimal point, auto/manual, run, setpoint & output limits, selected program, PID terms — returned as plain-language `findings` plus raw `values` in the command's `result`. Pass the setpoint you wanted to write and it tells you if limits would clamp it. Allowed with control disabled |
 
 A typical remote diagnosis:

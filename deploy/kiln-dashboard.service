@@ -31,11 +31,12 @@ Environment="PATH=/home/youruser/novus-n20k48-ble/.venv/bin:/usr/local/bin:/usr/
 #   api.env     API_WRITE_TOKEN / API_PUBLIC_URL / API_ALLOW_CONTROL (see api.env.example)
 EnvironmentFile=-/home/youruser/novus-n20k48-ble/notify.env
 EnvironmentFile=-/home/youruser/novus-n20k48-ble/api.env
-# headless=true stops Streamlit trying to open a browser or prompt for telemetry.
-ExecStart=/home/youruser/novus-n20k48-ble/.venv/bin/streamlit run kiln_dashboard.py \
+# run_dashboard.py starts the always-on monitor FIRST (so the kilns are
+# watched from the first second after a boot or update, with nobody logged
+# in), then serves the Streamlit dashboard in the same process.
+ExecStart=/home/youruser/novus-n20k48-ble/.venv/bin/python run_dashboard.py \
           --server.address 0.0.0.0 \
-          --server.port 8501 \
-          --server.headless true
+          --server.port 8501
 
 # Keep it alive no matter what. StartLimitIntervalSec=0 means systemd will
 # never stop retrying, even after many rapid failures (e.g. kilns powered off).

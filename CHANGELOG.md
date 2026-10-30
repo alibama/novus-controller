@@ -3,6 +3,37 @@
 All notable changes to this project are documented here. This project follows
 [Semantic Versioning](https://semver.org/) loosely.
 
+## [2.2.0] — 2026-10-30
+
+### Fixed (important)
+- **The monitor now starts with the service, not with the first login.**
+  It was created inside the Streamlit page run, after the password gate, so
+  after every reboot or update nothing was logged or watched — and no API
+  command ran — until someone opened the dashboard. New `run_dashboard.py`
+  starts the monitor first and then serves Streamlit in the same process;
+  the systemd unit, installer, updater and docs use it. Running
+  `streamlit run kiln_dashboard.py` by hand still works (the monitor then
+  starts on first page load, as before).
+- A single wedged Bluetooth connect can no longer stall the poll loop for
+  good: each device's connect + first read is capped at 45 s.
+
+### Added
+- **Timed hand-off to QuickTune.** The radio is one client per controller,
+  so the monitor and the phone app collide. The Home page now has a single
+  📶 Bluetooth control: pick controller(s) and 15/30/60/120/240 minutes — the
+  monitor steps off those controllers only (no reads, no watchdog, shown as
+  ⏸ on their panels with the resume time), keeps watching everything else,
+  and resumes by itself. "All of them" covers calibration sessions. The same
+  popover holds the read interval and the cooperative toggle. The old
+  indefinite *Release BLE* button is gone (scans still pause briefly).
+- API commands `pause` (`minutes`, controller or `"all"`) and `resume`, so a
+  phone shortcut or another app can ask for the radio before opening
+  QuickTune. `/live` reports `paused_until` per device and overall, plus the
+  read cadence.
+- `monitor.pause_device / resume_device / pause_all / resume_all /
+  is_paused / pause_remaining_s`; pauses are logged to each device's
+  `events.log`.
+
 ## [2.1.0] — 2026-10-30
 
 Driven by a real incident: a kiln ran ~375 °F above its program with the

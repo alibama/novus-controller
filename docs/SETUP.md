@@ -39,13 +39,18 @@ never touch them. Everything lives in the repo directory unless you set
 
 ```bash
 bash install.sh --no-services          # or: python3 -m venv .venv && .venv/bin/pip install -r requirements.txt -r requirements-api.txt
-.venv/bin/streamlit run kiln_dashboard.py --server.address 0.0.0.0 --server.port 8501
+.venv/bin/python run_dashboard.py --server.address 0.0.0.0 --server.port 8501
 .venv/bin/uvicorn api:app --host 0.0.0.0 --port 8000      # optional, in a second terminal
 ```
 
 Both read `.streamlit/secrets.toml` / `api.env` from the repo directory. The
 dashboard needs the Bluetooth adapter; the API never touches Bluetooth and
 can run anywhere that can see the data directory.
+
+`run_dashboard.py` starts the monitor (logging, watchdog, command queue)
+*before* Streamlit, so the kilns are watched from the moment the service is
+up, with nobody logged in. Plain `streamlit run kiln_dashboard.py` also works
+for development, but then the monitor only starts on the first page load.
 
 Docker is an alternative on Linux hosts (`docker compose up -d`); BlueZ is
 reached over the host's D-Bus, which is why the compose file uses host

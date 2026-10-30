@@ -39,6 +39,9 @@ ALLOWED_ACTIONS = {
     "poll": (),
     "diagnose": (),      # read-only: protection/unit/mode/limits/program/PID,
                          # optional "setpoint" arg = the value you wanted to write
+    "pause": (),         # hand the controller to QuickTune: monitor leaves it
+                         # alone for "minutes" (default 30). device "all" = every one
+    "resume": (),        # end a pause early (device or "all")
 }
 WRITE_ACTIONS = {"run_program", "stop_program", "set_manual_setpoint"}
 TERMINAL = {"done", "failed", "rejected"}
@@ -68,6 +71,13 @@ def validate(action: str, args: dict | None) -> tuple[bool, str]:
             float(args["setpoint"])
         except Exception:
             return False, "setpoint must be a number"
+    if action == "pause":
+        try:
+            m = float(args.get("minutes", 30))
+        except Exception:
+            return False, "minutes must be a number"
+        if not 1 <= m <= 24 * 60:
+            return False, "minutes must be 1..1440"
     return True, "ok"
 
 

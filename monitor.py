@@ -230,15 +230,62 @@ class Monitor:
         # Per-device descriptive metadata (role, model) published in live.json
         # so API consumers can label readings. Set by the app from devices.json.
         self.meta: dict[str, dict] = {n: {} for n in clients}
+        # Timed hand-offs to QuickTune: the radio is one-client-per-controller,
+        # so when a person wants the phone app on a controller the monitor must
+        # stay OFF that controller — and only that one — until a deadline, then
+        # resume by itself. pause_until is per device; pause_all_until covers
+        # every device (e.g. a long calibration session). `paused` (above) is
+        # the old indefinite switch and still works.
+        self.pause_until: dict[str, float] = {}
+        self.pause_all_until: float = 0.0
         self._task: Optional[asyncio.Task] = None
         self._started = False
         self._poll_lock = asyncio.Lock()   # serialize background + manual polls
         self._last_cmd_check = 0.0
 
+    # ---- pausing (hand the radio to QuickTune) ------------------------------
+    def pause_device(self, name: str, minutes: float) -> float:
+        """Leave `name` alone for `minutes`; returns the resume timestamp."""
+        until = time.time() + max(1.0, float(minutes)) * 60.0
+        self.pause_until[name] = until
+        self.worried.discard(name)
+        self._log_event(name, f"PAUSED for QuickTune for {minutes:g} min")
+        return until
+
+    def resume_device(self, name: str) -> None:
+        if self.pause_until.pop(name, None):
+            self._log_event(name, "RESUMED monitoring")
+
+    def pause_all(self, minutes: float) -> float:
+        self.pause_all_until = time.time() + max(1.0, float(minutes)) * 60.0
+        self.worried.clear()
+        return self.pause_all_until
+
+    def resume_all(self) -> None:
+        self.pause_all_until = 0.0
+        self.pause_until.clear()
+        self.paused = False
+
+    def is_paused(self, name: Optional[str] = None) -> bool:
+        now = time.time()
+        if self.paused or now < self.pause_all_until:
+            return True
+        return name is not None and now < self.pause_until.get(name, 0.0)
+
+    def pause_remaining_s(self, name: Optional[str] = None) -> Optional[float]:
+        """Seconds until monitoring resumes (None = indefinite / not paused)."""
+        now = time.time()
+        if self.paused:
+            return None
+        cands = [t for t in (self.pause_all_until,
+                             self.pause_until.get(name, 0.0) if name else 0.0) if t > now]
+        return (max(cands) - now) if cands else 0.0
+
     # After this many consecutive unreachable cycles, emit ONE gentle alert
     # (so a genuinely dead furnace still notifies, without per-cycle spam).
     UNREACHABLE_ALERT_AFTER = 6
     UNREACH_LOG_EVERY_S = 600.0        # at most one "unreachable" log per 10 min
+    DEVICE_TOUCH_TIMEOUT_S = 45.0      # connect + first read must finish in this
 
     def start(self, loop: asyncio.AbstractEventLoop):
         if self._started:
@@ -549,13 +596,33 @@ class Monitor:
             await self._poll_body()
 
     async def _poll_body(self):
-        for name, c in self.clients.items():
+        # drop expired per-device pauses
+        now = time.time()
+        for n in [n for n, t in self.pause_until.items() if t <= now]:
+            self.resume_device(n)
+        for name, c in list(self.clients.items()):
+            if self.is_paused(name):
+                # Handed to QuickTune: don't touch the radio for this one.
+                if c.connected:
+                    try:
+                        await c.disconnect()
+                    except Exception:
+                        pass
+                self.latest[name] = ControllerState(name=name, address=c.address,
+                                                    connected=False, pv=None, sp=None)
+                self._unreachable[name] = 0
+                self.worried.discard(name)
+                continue
             reachable = True
             try:
-                if not c.connected:
-                    await c.connect()
-                    await c.detect_scaling()
-                state = await c.read_state()
+                # Hard cap per device so one wedged BlueZ connect can never
+                # stall the whole loop (and with it the watchdog) for good.
+                async def _touch():
+                    if not c.connected:
+                        await c.connect()
+                        await c.detect_scaling()
+                    return await c.read_state()
+                state = await asyncio.wait_for(_touch(), timeout=self.DEVICE_TOUCH_TIMEOUT_S)
                 self._unreachable[name] = 0
             except Exception as e:
                 reachable = False
@@ -644,7 +711,7 @@ class Monitor:
             pass
 
         while True:
-            if self.paused:
+            if self.is_paused():
                 # BLE released to QuickTune (or a long manual session). Make
                 # sure we're not holding any links, then idle until resumed.
                 for name, c in self.clients.items():
@@ -653,6 +720,13 @@ class Monitor:
                             await c.disconnect()
                         except Exception:
                             pass
+                if self.pause_all_until and time.time() >= self.pause_all_until:
+                    self.pause_all_until = 0.0
+                self._write_live()
+                try:
+                    await self._process_commands()     # a remote "resume" must work
+                except Exception as e:
+                    print(f"[monitor] command processing failed: {e}")
                 await asyncio.sleep(2)
                 continue
 
@@ -664,7 +738,7 @@ class Monitor:
             elapsed = time.time() - cycle_start
             remaining = max(1.0, interval - elapsed)
             slept = 0.0
-            while slept < remaining and not self.paused:
+            while slept < remaining and not self.is_paused():
                 await asyncio.sleep(min(2.0, remaining - slept))
                 slept += 2.0
                 # Queued API commands are handled between polls so a remote
@@ -678,6 +752,11 @@ class Monitor:
     def live_snapshot(self) -> dict:
         """The latest reading per device as a plain, address-free dict."""
         devs = {}
+        now = time.time()
+
+        def _iso(ts):
+            return (datetime.fromtimestamp(ts, timezone.utc).isoformat(timespec="seconds")
+                    if ts and ts > now else None)
         for name, c in self.clients.items():
             s = self.latest.get(name)
             m = self.meta.get(name, {})
@@ -685,6 +764,7 @@ class Monitor:
                 "role": m.get("role", ""),
                 "model": m.get("model", ""),
                 "unit": getattr(c, "unit", "°"),
+                "paused_until": _iso(self.pause_until.get(name, 0.0)),
                 "connected": bool(s and s.connected),
                 "pv": s.pv if s else None,
                 "sp": s.sp if s else None,
@@ -704,7 +784,9 @@ class Monitor:
             "last_poll_utc": (datetime.fromtimestamp(self.last_poll_at, timezone.utc)
                               .isoformat(timespec="seconds") if self.last_poll_at else None),
             "poll_interval_s": self.poll_interval_s,
-            "paused": self.paused,
+            "cooperative": self.cooperative,
+            "paused": self.is_paused(),
+            "paused_until": _iso(self.pause_all_until) if not self.paused else "indefinite",
             "devices": devs,
         }
 
@@ -726,9 +808,29 @@ class Monitor:
             args = cmd.get("args") or {}
             cmdq.update(COMMANDS_DIR, cid, status="running")
             try:
+                if action in ("pause", "resume") and name == "all":
+                    if action == "pause":
+                        until = self.pause_all(float(args.get("minutes", 30)))
+                        result = {"paused_until": datetime.fromtimestamp(
+                            until, timezone.utc).isoformat(timespec="seconds")}
+                    else:
+                        self.resume_all()
+                        result = {"resumed": True}
+                    self._write_live()
+                    cmdq.update(COMMANDS_DIR, cid, status="done", result=result)
+                    continue
                 if name not in self.clients:
                     raise KeyError(f"unknown device '{name}'")
-                if action == "poll":
+                if action == "pause":
+                    until = self.pause_device(name, float(args.get("minutes", 30)))
+                    result = {"paused_until": datetime.fromtimestamp(
+                        until, timezone.utc).isoformat(timespec="seconds")}
+                    self._write_live()
+                elif action == "resume":
+                    self.resume_device(name)
+                    result = {"resumed": True}
+                    self._write_live()
+                elif action == "poll":
                     await self._poll_once()
                     result = self.live_snapshot()["devices"].get(name)
                 elif action == "run_program":

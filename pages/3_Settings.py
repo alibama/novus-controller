@@ -436,6 +436,9 @@ else:
 # ---------------------------------------------------------------------------
 st.divider()
 st.header("6 · Bluetooth sharing")
+st.caption("Tip: to use QuickTune on one controller, use the **📶 Bluetooth** "
+           "button on the Home page — it hands that controller over for a set "
+           "time and resumes by itself. The settings below are the defaults.")
 st.caption("A controller can only talk to one device at a time. In "
            "**cooperative mode** the monitor is a good neighbour: it connects "
            "just long enough to read temperature and output, then disconnects, "

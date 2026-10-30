@@ -67,7 +67,12 @@ Then open `http://<that-machine>:8501`, enter the passphrase, and go to
   running program and its segments, RUN/STOP, and a sparkline.
 - Always-on background monitor logs every controller to CSV and runs even with
   no browser open. Cooperative by default: it connects, reads, disconnects, so
-  QuickTune on a phone is never blocked.
+  QuickTune on a phone is rarely blocked.
+- **One Bluetooth control** on the Home page: *hand a controller to
+  QuickTune for 15/30/60/120 minutes* — the monitor steps off that controller
+  only, keeps watching the rest, and resumes by itself — plus the read
+  interval. Same thing over the API (`pause` / `resume`), so a phone shortcut
+  can ask for the radio before opening QuickTune.
 - **Furnace watchdog**: if a furnace stays below your trigger temperature it
   does the same stop/start you'd do by hand, confirms the climb, and alerts
   you (Telegram / ntfy / Twilio SMS) — with guards so it never drives output
@@ -124,7 +129,7 @@ Bluetooth address or a secret**. Writes need `Authorization: Bearer <token>`
 | GET | `/telemetry/{controller}` | raw logged samples (PV, SP, output, program) |
 | GET | `/events`, `/notes`, `/commands` | audit trail, notes, queued commands |
 | POST | `/notes` | attach a note to a controller or firing |
-| POST | `/commands` | queue `run_program` / `stop_program` / `set_manual_setpoint` / `poll` / `diagnose` |
+| POST | `/commands` | queue `run_program` / `stop_program` / `set_manual_setpoint` / `poll` / `diagnose` / `pause` / `resume` |
 
 Commands are executed by the dashboard's monitor (the only process that owns
 the Bluetooth radio) within a few seconds, through the same safety rules as
@@ -175,6 +180,7 @@ permissions, laptop-as-server hardening, and updating/rolling back.
 ```
 novus-controller/
 ├── install.sh               # one-line install + update
+├── run_dashboard.py         # service entry: starts the monitor, then Streamlit
 ├── kiln_dashboard.py        # Streamlit entry point (Home)
 ├── pages/                   # Devices, Analytics, Settings, Recovery & Logic,
 │                            # Notebook, Learn, Open Data & API

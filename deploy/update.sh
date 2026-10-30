@@ -180,7 +180,7 @@ if [ "${#RESTARTED[@]}" -eq 0 ]; then
   while read -r unit; do
     [ -z "$unit" ] && continue
     es="$(systemctl show -p ExecStart --value "$unit" 2>/dev/null || true)"
-    if printf '%s' "$es" | grep -qiE "kiln_dashboard\.py|uvicorn +api:app|${ROOT}"; then
+    if printf '%s' "$es" | grep -qiE "kiln_dashboard\.py|run_dashboard\.py|uvicorn +api:app|${ROOT}"; then
       log "discovered service: ${unit} — restarting…"
       if sudo systemctl restart "$unit"; then
         RESTARTED+=("${unit%.service}")
@@ -196,15 +196,15 @@ fi
 if [ "${#RESTARTED[@]}" -eq 0 ]; then
   # Nothing was restarted. Be honest about whether the app is up on OLD code or
   # down entirely — never report a bland success.
-  if pgrep -af "streamlit run|uvicorn +api:app" >/dev/null 2>&1; then
+  if pgrep -af "streamlit run|run_dashboard.py|uvicorn +api:app" >/dev/null 2>&1; then
     log "!! The app is RUNNING but under no unit I could restart, so it is still"
     log "!! on the OLD code. Restart it yourself so this update takes effect:"
     log "     sudo systemctl restart <your-service-name>   # then set KILN_SERVICES"
     log "   or, if you run it by hand, stop it and relaunch:"
-    log "     $VENV/bin/streamlit run kiln_dashboard.py --server.port 8501 --server.address 0.0.0.0"
+    log "     $VENV/bin/python run_dashboard.py --server.port 8501 --server.address 0.0.0.0"
   else
     log "!! The app does NOT appear to be running. Start it now:"
-    log "     $VENV/bin/streamlit run kiln_dashboard.py --server.port 8501 --server.address 0.0.0.0"
+    log "     $VENV/bin/python run_dashboard.py --server.port 8501 --server.address 0.0.0.0"
     log "   (or run  bash install.sh  to set up the systemd services.)"
   fi
   log "=== Update finished: code is updated & validated, but NO service was "

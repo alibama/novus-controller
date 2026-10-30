@@ -32,7 +32,7 @@ COPY . .
 EXPOSE 8501 8000
 
 # Dashboard by default; docker-compose.yml overrides this for the api service.
-CMD ["streamlit", "run", "kiln_dashboard.py", \
+# run_dashboard.py starts the monitor first, then serves Streamlit.
+CMD ["python", "run_dashboard.py", \
      "--server.address", "0.0.0.0", \
-     "--server.port", "8501", \
-     "--server.headless", "true"]
+     "--server.port", "8501"]

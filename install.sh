@@ -218,7 +218,7 @@ DASH_UNIT=/etc/systemd/system/kiln-dashboard.service
 if [ "$WITH_SERVICES" = 1 ]; then
   say "Services (systemd)"
   if ! command -v systemctl >/dev/null 2>&1; then
-    warn "systemctl not found; skipping services. Run by hand: $VENV/bin/streamlit run kiln_dashboard.py"
+    warn "systemctl not found; skipping services. Run by hand: $VENV/bin/python run_dashboard.py"
   elif [ "$HAVE_SUDO" = 0 ] && [ "$(id -u)" -ne 0 ]; then
     warn "no sudo; skipping services. As root, run:  bash deploy/install-services.sh --with-api --enable"
   else
@@ -288,7 +288,7 @@ if [ "$WITH_SERVICES" = 1 ]; then
   echo "  Logs:      journalctl -u kiln-dashboard -f"
   echo "  Status:    systemctl status kiln-dashboard"
 else
-  echo "  Run it:    cd $NOVUS_DIR && .venv/bin/streamlit run kiln_dashboard.py"
+  echo "  Run it:    cd $NOVUS_DIR && .venv/bin/python run_dashboard.py"
   echo "  API:       cd $NOVUS_DIR && .venv/bin/uvicorn api:app --host 0.0.0.0 --port 8000"
 fi
 echo

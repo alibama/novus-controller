@@ -4,6 +4,9 @@ kiln_dashboard.py  —  HOME page
 The front page for the crew:
   * Furnaces (temperature-critical) shown as big temperature cards up top.
   * Kilns shown below with program status and run/stop controls.
+  * One Bluetooth control: how often to read, and "hand this controller to
+    QuickTune for N minutes" — the monitor steps off that controller only and
+    resumes by itself.
   * With no controllers yet, a short walkthrough that starts a scan.
 
 Other pages (sidebar): Devices, Analytics, Settings, Recovery & Logic,
@@ -41,21 +44,12 @@ if not devices:
                "controller by its address if you already know it.")
     st.stop()
 
-# --- Released state --------------------------------------------------------
-if runtime["ble_released"]:
-    st.warning("**Bluetooth released — controllers are free for QuickTune Mobile.** "
-               "Monitoring is paused.")
-    if st.button("🔌 Take Bluetooth back & resume monitoring", type="primary",
-                 width="stretch"):
-        core.reclaim_ble(bridge, clients, monitor)
-        st.rerun()
-    st.stop()
-
-# --- Top row: poll status left, FURNACE temps right ------------------------
 furnaces = [d for d in devices if d.role == ROLE_FURNACE]
 others = [d for d in devices if d.role == ROLE_OTHER]
 kilns = [d for d in devices if d not in furnaces and d not in others]
+names = [d.name for d in devices]
 
+# --- Top row: status + Bluetooth control left, FURNACE temps right ---------
 left, right = st.columns([1, 2])
 with left:
     if monitor.last_poll_at:
@@ -64,13 +58,79 @@ with left:
     else:
         fresh = "waiting for first poll…"
     st.caption(f"Reads every {monitor.poll_interval_s/60:g} min · last reading {fresh}")
-    if st.button("🔄 Read now", width="stretch"):
+
+    b1, b2 = st.columns(2)
+    if b1.button("🔄 Read now", width="stretch"):
         with st.spinner("Reading every controller…"):
             try:
                 bridge.call(monitor._poll_once(), timeout=90)
             except Exception as e:
                 st.warning(f"poll failed: {e}")
         st.rerun()
+
+    # ---- the one Bluetooth control ----------------------------------------
+    _ms = core.load_monitor_settings()
+    with b2.popover("📶 Bluetooth", width="stretch",
+                    help="Hand a controller to QuickTune, or change how often "
+                         "the monitor reads."):
+        # Forms, so the 5-second auto-refresh can't swallow a half-made choice:
+        # nothing happens until the button is pressed.
+        with st.form("bt_pause_form", border=False):
+            st.markdown("**Hand a controller to QuickTune**")
+            st.caption("A controller talks to one device at a time. While you use "
+                       "the phone app, the monitor stays off *that* controller and "
+                       "keeps watching the rest, then resumes on its own.")
+            who = st.multiselect("Controller(s)", names, placeholder="choose one or more")
+            every = st.checkbox("All of them (e.g. calibration, maintenance)")
+            mins = st.radio("For how long", [15, 30, 60, 120, 240], index=1,
+                            horizontal=True, format_func=lambda m: f"{m} min")
+            if st.form_submit_button("⏸ Pause monitoring", type="primary",
+                                     width="stretch"):
+                if not (who or every):
+                    st.warning("Pick a controller (or All of them) first.")
+                else:
+                    if every:
+                        core.release_ble(bridge, clients, monitor, minutes=mins)
+                    else:
+                        for n in who:
+                            monitor.pause_device(n, mins)
+                            try:
+                                bridge.call(clients[n].disconnect(), timeout=8)
+                            except Exception:
+                                pass
+                    monitor._write_live()
+                    st.rerun()
+        st.divider()
+        with st.form("bt_settings_form", border=False):
+            st.markdown("**How often to read**")
+            poll_min = st.slider("Read every (minutes)", 1, 15,
+                                 int(round(_ms.get("poll_interval_s", 300) / 60)),
+                                 help="Each read holds a controller's Bluetooth for "
+                                      "a second or two. Longer = fewer collisions "
+                                      "with QuickTune, coarser charts. 3–5 is a good "
+                                      "balance; 1 only while troubleshooting.")
+            coop = st.toggle("Cooperative (disconnect between reads)",
+                             value=bool(_ms.get("cooperative", True)),
+                             help="Keep this on. Off = the monitor holds connections "
+                                  "and QuickTune can never get in.")
+            if st.form_submit_button("Save", width="stretch"):
+                core.save_monitor_settings({"cooperative": bool(coop),
+                                            "poll_interval_s": float(poll_min * 60)})
+                monitor.cooperative = bool(coop)
+                monitor.poll_interval_s = float(poll_min * 60)
+                st.rerun()
+
+    paused_names = [n for n in names if monitor.is_paused(n)]
+    if monitor.is_paused():
+        st.warning("⏸ **All monitoring paused for QuickTune** — resumes "
+                   f"{core.fmt_remaining(monitor.pause_remaining_s())}. The "
+                   "watchdog is off while paused.")
+        if st.button("▶ Resume everything now", type="primary", width="stretch"):
+            core.reclaim_ble(bridge, clients, monitor)
+            st.rerun()
+    elif paused_names:
+        st.info("⏸ Handed to QuickTune: " + ", ".join(paused_names)
+                + ". Everything else is still watched.")
     if monitor.worried:
         st.warning("👀 Watching closely: " + ", ".join(sorted(monitor.worried)))
 
@@ -91,7 +151,9 @@ with right:
                     delta=(f"{delta:+.0f}° vs {target:g}" if delta is not None else None),
                     delta_color="inverse",
                 )
-                if not s.connected:
+                if monitor.is_paused(dev.name):
+                    st.caption("⏸ handed to QuickTune")
+                elif not s.connected:
                     st.caption("⚫ no recent reading")
                 elif s.output_pct is not None:
                     st.caption(f"output {s.output_pct:g}% · SP {s.sp:g}{unit}" if s.sp is not None
@@ -133,7 +195,7 @@ if others:
 
 # --- Footer controls -------------------------------------------------------
 st.divider()
-c1, c2, c3 = st.columns(3)
+c1, c2 = st.columns(2)
 with c1:
     if st.button("📋 Load all programs", width="stretch",
                  help="Read every program's segments from all controllers."):
@@ -146,12 +208,6 @@ with c1:
                 st.warning(f"program read failed: {e}")
         st.rerun()
 with c2:
-    if st.button("📲 Release Bluetooth for QuickTune", width="stretch",
-                 help="Pause polling and free Bluetooth for QuickTune."):
-        with st.spinner("Releasing Bluetooth…"):
-            core.release_ble(bridge, clients, monitor)
-        st.rerun()
-with c3:
     if st.button("🌐 Open data & API", width="stretch",
                  help="Harvest firings for glassdatabase.org, API status and keys."):
         st.switch_page("pages/7_Open_Data.py")

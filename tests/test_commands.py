@@ -5,7 +5,7 @@ live add/remove of devices. BLE + notify stubbed; no hardware.
 
 Run with:  pytest tests/test_commands.py
 """
-import sys, pathlib, types, asyncio, json, os, tempfile, importlib
+import sys, pathlib, types, asyncio, json, os, tempfile, importlib, time
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 _b = types.ModuleType("bleak"); _b.BleakClient = type("B", (), {})
@@ -151,3 +151,40 @@ def test_password_opens_session_before_writes():
     m.passwords["k"] = None
     _run(m.control("k", "stop_program"))           # no password: no session
     assert c.log == ["stop"]
+
+
+def test_pause_skips_device_and_auto_resumes():
+    tmp, M = _env()
+    a, b = FakeClient("a"), FakeClient("b")
+    m = M.Monitor({"a": a, "b": b}, {})
+    m.pause_device("a", 30)
+    assert m.is_paused("a") and not m.is_paused("b") and not m.is_paused()
+    _run(m._poll_body())
+    assert not m.latest["a"].connected and m.latest["b"].pv == 1200
+    assert a.connected is False
+    live = json.loads(M.LIVE_PATH.read_text())
+    assert live["devices"]["a"]["paused_until"] and live["devices"]["b"]["paused_until"] is None
+    m.pause_until["a"] = time.time() - 1            # deadline passed
+    _run(m._poll_body())
+    assert not m.is_paused("a") and m.latest["a"].pv == 1200
+
+
+def test_pause_all_and_remote_pause_resume_commands():
+    tmp, M = _env()
+    c = FakeClient("k")
+    m = M.Monitor({"k": c}, {})
+    cmdq.enqueue(M.COMMANDS_DIR, "all", "pause", {"minutes": 5})
+    _run(m._process_commands())
+    assert m.is_paused() and m.is_paused("k")
+    assert cmdq.recent(M.COMMANDS_DIR)[0]["result"]["paused_until"]
+    cmdq.enqueue(M.COMMANDS_DIR, "all", "resume", {})
+    _run(m._process_commands())
+    assert not m.is_paused()
+    cmdq.enqueue(M.COMMANDS_DIR, "k", "pause", {"minutes": 10})
+    _run(m._process_commands())
+    assert m.is_paused("k")
+    cmdq.enqueue(M.COMMANDS_DIR, "k", "resume", {})
+    _run(m._process_commands())
+    assert not m.is_paused("k")
+    assert [x["status"] for x in cmdq.recent(M.COMMANDS_DIR)] == ["done"] * 4
+    ok, msg = cmdq.validate("pause", {"minutes": 0}); assert not ok

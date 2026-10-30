@@ -395,36 +395,69 @@ class AsyncBridge:
         return future.result(timeout=timeout)
 
 
-@st.cache_resource
+# Process-wide singletons. These used to be st.cache_resource functions, which
+# are also process-wide — but they could only be created from inside a page
+# run, i.e. after someone opened the dashboard and logged in. That left the
+# monitor (and the furnace watchdog) OFF after every reboot or update until a
+# human visited the site. run_dashboard.py now calls boot() before Streamlit
+# starts, so the monitor runs from the first second; pages just pick it up.
+#
+# The registry lives on the `sys` module, NOT in this module: Streamlit
+# re-imports local modules when their files change (a `git pull` while the
+# service runs, say), and a fresh app_core with an empty registry would start
+# a SECOND monitor competing for the radio. sys survives module reloads.
+import sys as _sys
+_singletons: dict = _sys.__dict__.setdefault("_kiln_singletons", {})
+_singletons_lock = _sys.__dict__.setdefault("_kiln_singletons_lock",
+                                           threading.RLock())   # getters nest
+
+
 def get_bridge() -> AsyncBridge:
-    return AsyncBridge()
+    with _singletons_lock:
+        if "bridge" not in _singletons:
+            _singletons["bridge"] = AsyncBridge()
+        return _singletons["bridge"]
 
 
-@st.cache_resource
 def get_devices_cached() -> list[Device]:
     # Cached so all pages agree on the device set within a server lifetime.
-    # reload_devices() clears it after the Devices page saves.
-    return load_devices()
+    # reload_devices() refreshes it after the Devices page saves.
+    with _singletons_lock:
+        if "devices" not in _singletons:
+            _singletons["devices"] = load_devices()
+        return _singletons["devices"]
 
 
-@st.cache_resource
+def invalidate_devices() -> None:
+    with _singletons_lock:
+        _singletons.pop("devices", None)
+
+
 def get_runtime_state() -> dict:
-    return {"ble_released": False}
+    with _singletons_lock:
+        return _singletons.setdefault("runtime", {"ble_released": False})
 
 
-@st.cache_resource
-def get_clients(_bridge: AsyncBridge) -> dict[str, NovusClient]:
+def get_clients(_bridge: AsyncBridge = None) -> dict[str, NovusClient]:
     """One NovusClient per device. The Monitor owns connections. The dict is
     shared with the monitor and mutated in place by reload_devices()."""
-    return {d.name: NovusClient(d.name, d.address) for d in get_devices_cached()}
+    with _singletons_lock:
+        if "clients" not in _singletons:
+            _singletons["clients"] = {d.name: NovusClient(d.name, d.address)
+                                      for d in get_devices_cached()}
+        return _singletons["clients"]
 
 
-@st.cache_resource
-def get_monitor(_bridge: AsyncBridge, _clients: dict) -> Monitor:
+def get_monitor(_bridge: AsyncBridge = None, _clients: dict = None) -> Monitor:
     """Start the always-on monitor once."""
+    with _singletons_lock:
+        if "monitor" in _singletons:
+            return _singletons["monitor"]
+    bridge = _bridge or get_bridge()
+    clients = _clients if _clients is not None else get_clients(bridge)
     devs = get_devices_cached()
     watchdogs = {d.name: watchdog_for(d) for d in devs}
-    m = Monitor(_clients, watchdogs,
+    m = Monitor(clients, watchdogs,
                 poll_interval_s=_monitor_setting("poll_interval_s", POLL_INTERVAL_S),
                 hold_connection=False,
                 cooperative=_monitor_setting("cooperative", True))
@@ -432,17 +465,20 @@ def get_monitor(_bridge: AsyncBridge, _clients: dict) -> Monitor:
         m.writable[d.name] = bool(d.writes_allowed)
         m.passwords[d.name] = d.password_int
         m.meta[d.name] = device_meta(d)
-    m.start(_bridge.loop)
-    return m
+    apply_watchdog_settings(m)
+    with _singletons_lock:
+        if "monitor" not in _singletons:
+            _singletons["monitor"] = m
+            m.start(bridge.loop)
+        return _singletons["monitor"]
 
 
 def boot():
-    """Call at the top of every page after the password gate. Returns
-    (bridge, clients, monitor, devices, runtime)."""
+    """Returns (bridge, clients, monitor, devices, runtime). Safe to call from
+    the launcher before Streamlit starts and from every page afterwards."""
     bridge = get_bridge()
     clients = get_clients(bridge)
     monitor = get_monitor(bridge, clients)
-    apply_watchdog_settings(monitor)
     devices = get_devices_cached()
     runtime = get_runtime_state()
     return bridge, clients, monitor, devices, runtime
@@ -494,28 +530,44 @@ def reload_devices(bridge, clients, monitor) -> list[Device]:
                     cfg.enabled = False
                     cfg.auto_recover = False
     apply_watchdog_settings(monitor)
-    get_devices_cached.clear()
+    invalidate_devices()
     monitor._write_live()
     return get_devices_cached()
 
 
 # --- BLE release / reclaim -------------------------------------------------
-def release_ble(bridge, clients, monitor):
-    monitor.paused = True
+def release_ble(bridge, clients, monitor, minutes: Optional[float] = None):
+    """Free the radio for QuickTune. With `minutes` the monitor resumes by
+    itself; without, it stays paused until reclaim_ble() (used around scans)."""
+    if minutes is None:
+        monitor.paused = True
+    else:
+        monitor.pause_all(minutes)
     time.sleep(1.2)
     for name, c in list(clients.items()):
         try:
             bridge.call(c.disconnect(), timeout=8)
         except Exception as e:
             print(f"[{name}] release failed: {e}")
-    get_runtime_state()["ble_released"] = True
+    get_runtime_state()["ble_released"] = (minutes is None)
 
 
 def reclaim_ble(bridge, clients, monitor):
     # Connections are re-established lazily by the next poll (cooperative
     # mode never holds them anyway), so just resume the monitor.
-    monitor.paused = False
+    monitor.resume_all()
     get_runtime_state()["ble_released"] = False
+
+
+def fmt_remaining(seconds: Optional[float]) -> str:
+    """'at 14:32 (in 27 min)' for a pause, in the server's local time."""
+    if seconds is None:
+        return "when you resume it"
+    if seconds <= 0:
+        return "now"
+    until = time.strftime("%H:%M", time.localtime(time.time() + seconds))
+    mins = int(round(seconds / 60))
+    return f"at {until} (in {mins} min)" if mins >= 1 else f"at {until} (under a minute)"
 
 
 # --- password gate ---------------------------------------------------------
@@ -609,6 +661,18 @@ def render_kiln_panel(col, dev: Device, state: ControllerState, bridge, monitor,
     unit = unit_of(clients or {}, name)
     can_write = bool(dev.writes_allowed) and dev.role != ROLE_OTHER
     with col:
+        if monitor.is_paused(name):
+            st.subheader(f"⏸ {name}")
+            st.warning(f"**Handed to QuickTune** — monitoring resumes "
+                       f"{fmt_remaining(monitor.pause_remaining_s(name))}.")
+            if st.button("▶ Resume monitoring now", key=f"resume_{uid}", width="stretch"):
+                monitor.resume_device(name)
+                if not monitor.pause_until and not monitor.pause_all_until:
+                    monitor.resume_all()
+                st.rerun()
+            if state.pv is not None:
+                st.caption(f"last reading: PV {state.pv:g}{unit} · SP {state.sp:g}{unit}")
+            return
         if not state.connected:
             st.subheader(f"⚫ {name}")
             st.caption("not connected on last poll (normal between poll cycles)")

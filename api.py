@@ -160,7 +160,8 @@ def index():
             "GET /commands/{id}": "one command's status",
             "POST /notes": "(bearer token) attach a note to a controller/firing",
             "POST /commands": "(bearer token) queue run_program / stop_program / "
-                              "set_manual_setpoint / poll / diagnose for a controller",
+                              "set_manual_setpoint / poll / diagnose / pause / resume "
+                              "for a controller ('all' for pause/resume)",
             "GET /health": "liveness check",
             "GET /docs": "interactive OpenAPI docs",
         },
@@ -417,10 +418,11 @@ def post_note(note: NoteIn, _: str = Depends(require_token)):
 # Commands (queued for the dashboard's monitor, which owns Bluetooth)
 # ---------------------------------------------------------------------------
 class CommandIn(BaseModel):
-    controller: str
-    action: str = Field(..., description="run_program | stop_program | set_manual_setpoint | poll | diagnose")
+    controller: str = Field(..., description="device name, or 'all' for pause/resume")
+    action: str = Field(..., description="run_program | stop_program | set_manual_setpoint | poll | diagnose | pause | resume")
     program: int | None = Field(None, ge=1, le=20)
     setpoint: float | None = None
+    minutes: float | None = Field(None, ge=1, le=1440, description="pause length (pause only, default 30)")
     source: str | None = Field(None, max_length=120, description="who/what is asking (for the audit log)")
 
 
@@ -435,7 +437,8 @@ def post_command(cmd: CommandIn, _: str = Depends(require_token)):
     """Queue a controller command. The monitor executes it within a few
     seconds and records the outcome; poll GET /commands/{id} for status.
     Read-only (unverified) controllers reject write actions."""
-    if cmd.controller not in _known_names():
+    if cmd.controller not in _known_names() and not (
+            cmd.controller == "all" and cmd.action in ("pause", "resume")):
         raise HTTPException(404, f"unknown controller '{cmd.controller}'")
     if cmd.action in cmdq.WRITE_ACTIONS and not control_allowed():
         raise HTTPException(403, "control commands are disabled on this install "
@@ -445,6 +448,8 @@ def post_command(cmd: CommandIn, _: str = Depends(require_token)):
         args["program"] = cmd.program
     if cmd.setpoint is not None:
         args["setpoint"] = cmd.setpoint
+    if cmd.minutes is not None:
+        args["minutes"] = cmd.minutes
     try:
         entry = cmdq.enqueue(COMMANDS_DIR, cmd.controller, cmd.action, args,
                              source=cmd.source or "api")
