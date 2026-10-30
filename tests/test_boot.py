@@ -37,8 +37,30 @@ def test_boot_starts_monitor_without_a_page_run():
     importlib.reload(app_core)
     b3, c3, m3, _, _ = app_core.boot()
     assert m3 is mon and c3 is clients and b3 is bridge
-    # the launcher's flag parsing
+    # the launcher's flag parsing: defaults < env < flags
     import run_dashboard as rd
     o = rd._flag_options(["--server.address", "127.0.0.1", "--server.port=8600"])
     assert o["server.address"] == "127.0.0.1" and o["server.port"] == 8600
     assert o["server.headless"] is True
+    os.environ["DASHBOARD_ADDRESS"] = "127.0.0.1"; os.environ["DASHBOARD_PORT"] = "9000"
+    o = rd._flag_options([])
+    assert o["server.address"] == "127.0.0.1" and o["server.port"] == 9000
+    o = rd._flag_options(["--server.port", "8501"])
+    assert o["server.port"] == 8501
+    os.environ.pop("DASHBOARD_ADDRESS"); os.environ.pop("DASHBOARD_PORT")
+
+
+def test_roles_from_passphrases():
+    import app_core
+    sec = {"dashboard_password": "adminpw", "viewer_password": "viewpw"}
+    assert app_core.role_for_password("adminpw", sec) == app_core.ROLE_ADMIN
+    assert app_core.role_for_password("viewpw", sec) == app_core.ROLE_VIEWER
+    assert app_core.role_for_password("nope", sec) is None
+    assert app_core.role_for_password("", sec) is None
+    # no viewer configured → only admin works; empty viewer never matches ""
+    assert app_core.role_for_password("viewpw", {"dashboard_password": "adminpw"}) is None
+    assert app_core.role_for_password("", {"dashboard_password": "adminpw",
+                                           "viewer_password": ""}) is None
+    # same passphrase for both → admin wins
+    assert app_core.role_for_password("x", {"dashboard_password": "x",
+                                            "viewer_password": "x"}) == app_core.ROLE_ADMIN

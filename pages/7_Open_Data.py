@@ -60,7 +60,7 @@ if devices:
             dev.name, min_value=0.0, max_value=200.0,
             value=float(getattr(dev, "power_kw", 0.0) or 0.0), step=0.5,
             key=f"kw_{dev.address}")
-if st.button("💾 Save studio & energy settings", type="primary"):
+if core.is_admin() and st.button("💾 Save studio & energy settings", type="primary"):
     core.save_studio_settings({"studio": studio_name.strip(),
                                "rate_per_kwh": float(rate),
                                "currency": (currency or "USD").strip()})
@@ -101,7 +101,7 @@ except Exception as e:
 
 pub = st.text_input("Public URL of the API (optional, https)", value=public_url,
                     placeholder="https://kilns.example.ts.net:10000")
-if st.button("Save public URL"):
+if core.is_admin() and st.button("Save public URL"):
     core.save_api_env({"API_PUBLIC_URL": pub.strip().rstrip("/")})
     st.success("Saved to api.env. Restart the API (`sudo systemctl restart "
                "kiln-api`) for it to show in the index.")
@@ -142,45 +142,48 @@ st.markdown("Any app holding the **write token** can post a note against a "
             "hold a setpoint, take a reading). Commands run through the same "
             "safety rules as the buttons here, and read-only controllers refuse "
             "them. Reads never need the token.")
-tok = api_env.get("API_WRITE_TOKEN", "")
-allow_ctrl = (api_env.get("API_ALLOW_CONTROL", "1").lower() in ("1", "true", "yes", "on"))
-t1, t2, t3 = st.columns([3, 1, 1])
-if tok:
-    show = st.session_state.get("show_token", False)
-    t1.code(tok if show else tok[:4] + "•" * max(8, len(tok) - 8) + tok[-4:], language="text")
-    if t2.button("👁 Show" if not show else "Hide", width="stretch"):
-        st.session_state["show_token"] = not show
+if core.is_admin():
+    tok = api_env.get("API_WRITE_TOKEN", "")
+    allow_ctrl = (api_env.get("API_ALLOW_CONTROL", "1").lower() in ("1", "true", "yes", "on"))
+    t1, t2, t3 = st.columns([3, 1, 1])
+    if tok:
+        show = st.session_state.get("show_token", False)
+        t1.code(tok if show else tok[:4] + "•" * max(8, len(tok) - 8) + tok[-4:], language="text")
+        if t2.button("👁 Show" if not show else "Hide", width="stretch"):
+            st.session_state["show_token"] = not show
+            st.rerun()
+    else:
+        t1.warning("No token in `api.env` — writes are disabled. Generate one:")
+    if t3.button("🔁 New token", width="stretch",
+                 help="Generates a fresh token; apps using the old one stop working."):
+        core.save_api_env({"API_WRITE_TOKEN": secrets.token_hex(16)})
+        st.session_state["show_token"] = True
+        st.success("New token written to api.env. Restart the API to use it: "
+                   "`sudo systemctl restart kiln-api`.")
         st.rerun()
+
+    ctl = st.toggle("Allow control commands through the API (run/stop/setpoint)",
+                    value=allow_ctrl)
+    if ctl != allow_ctrl:
+        core.save_api_env({"API_ALLOW_CONTROL": "1" if ctl else "0"})
+        st.success("Saved. Restart the API to apply.")
+
+    with st.expander("Examples (curl)"):
+        st.code(f"""# post a note
+    curl -X POST {base}/notes -H "Authorization: Bearer $TOKEN" \\
+         -H "Content-Type: application/json" \\
+         -d '{{"controller":"kiln1","text":"6mm clear, two layers, kiln wash fresh","author":"anson"}}'
+
+    # run program 3 on kiln1 (queued; the dashboard executes it within seconds)
+    curl -X POST {base}/commands -H "Authorization: Bearer $TOKEN" \\
+         -H "Content-Type: application/json" \\
+         -d '{{"controller":"kiln1","action":"run_program","program":3,"source":"scheduler"}}'
+
+    # check what happened
+    curl {base}/commands/<id>""", language="bash")
+
 else:
-    t1.warning("No token in `api.env` — writes are disabled. Generate one:")
-if t3.button("🔁 New token", width="stretch",
-             help="Generates a fresh token; apps using the old one stop working."):
-    core.save_api_env({"API_WRITE_TOKEN": secrets.token_hex(16)})
-    st.session_state["show_token"] = True
-    st.success("New token written to api.env. Restart the API to use it: "
-               "`sudo systemctl restart kiln-api`.")
-    st.rerun()
-
-ctl = st.toggle("Allow control commands through the API (run/stop/setpoint)",
-                value=allow_ctrl)
-if ctl != allow_ctrl:
-    core.save_api_env({"API_ALLOW_CONTROL": "1" if ctl else "0"})
-    st.success("Saved. Restart the API to apply.")
-
-with st.expander("Examples (curl)"):
-    st.code(f"""# post a note
-curl -X POST {base}/notes -H "Authorization: Bearer $TOKEN" \\
-     -H "Content-Type: application/json" \\
-     -d '{{"controller":"kiln1","text":"6mm clear, two layers, kiln wash fresh","author":"anson"}}'
-
-# run program 3 on kiln1 (queued; the dashboard executes it within seconds)
-curl -X POST {base}/commands -H "Authorization: Bearer $TOKEN" \\
-     -H "Content-Type: application/json" \\
-     -d '{{"controller":"kiln1","action":"run_program","program":3,"source":"scheduler"}}'
-
-# check what happened
-curl {base}/commands/<id>""", language="bash")
-
+    st.caption("The write token and its switches are only shown to admin sessions.")
 st.divider()
 
 # ===========================================================================

@@ -571,24 +571,77 @@ def fmt_remaining(seconds: Optional[float]) -> str:
 
 
 # --- password gate ---------------------------------------------------------
+# Two passphrases in .streamlit/secrets.toml:
+#   dashboard_password  → "admin": can run/stop/program/pause and change settings
+#   viewer_password     → "viewer": sees everything, changes nothing (no
+#                          Bluetooth writes, no settings, no token)
+ROLE_ADMIN = "admin"
+ROLE_VIEWER = "viewer"
+
+
+def role_for_password(pw: str, secrets: dict) -> Optional[str]:
+    """Pure: which role a passphrase grants, or None. Viewer is checked
+    second so an identical passphrase for both still yields admin."""
+    pw = (pw or "")
+    admin = secrets.get("dashboard_password") or ""
+    viewer = secrets.get("viewer_password") or ""
+    if admin and pw == admin:
+        return ROLE_ADMIN
+    if viewer and pw == viewer:
+        return ROLE_VIEWER
+    return None
+
+
+def current_role() -> Optional[str]:
+    return st.session_state.get("role") if st.session_state.get("auth_ok") else None
+
+
+def is_admin() -> bool:
+    return current_role() == ROLE_ADMIN
+
+
+def viewer_note(what: str = "This page's controls") -> None:
+    """Standard read-only banner for viewer sessions."""
+    st.info(f"👁 Read-only account. {what} are hidden; sign in with the admin "
+            "passphrase to change anything.")
+
+
+def _sidebar_identity() -> None:
+    role = current_role()
+    if not role:
+        return
+    with st.sidebar:
+        c1, c2 = st.columns([2, 1])
+        c1.caption(("🔑 admin" if role == ROLE_ADMIN else "👁 read-only") + " session")
+        if c2.button("sign out", key="signout", type="tertiary"):
+            st.session_state.pop("auth_ok", None)
+            st.session_state.pop("role", None)
+            st.rerun()
+
+
 def require_password() -> bool:
     if st.session_state.get("auth_ok"):
+        _sidebar_identity()
         return True
     try:
-        expected = st.secrets.get("dashboard_password", None)
+        secrets = {"dashboard_password": st.secrets.get("dashboard_password", None),
+                   "viewer_password": st.secrets.get("viewer_password", None)}
     except Exception:
-        expected = None
-    if not expected:
+        secrets = {}
+    if not secrets.get("dashboard_password"):
         st.error("No `dashboard_password` set in `.streamlit/secrets.toml` — "
                  "refusing to start unauthenticated. The installer "
                  "(`install.sh`) creates one for you; or write the file by hand:\n\n"
-                 "```toml\ndashboard_password = \"choose-a-passphrase\"\n```")
+                 "```toml\ndashboard_password = \"choose-a-passphrase\"\n"
+                 "viewer_password = \"a-different-one\"   # optional read-only login\n```")
         return False
     st.title(f"🔥 {studio_title()}")
     pw = st.text_input("Passphrase", type="password")
     if pw:
-        if pw == expected:
+        role = role_for_password(pw, secrets)
+        if role:
             st.session_state["auth_ok"] = True
+            st.session_state["role"] = role
             st.rerun()
         else:
             st.error("Incorrect passphrase")
@@ -659,13 +712,15 @@ def render_kiln_panel(col, dev: Device, state: ControllerState, bridge, monitor,
     uid = dev.address            # unique per controller; use in widget keys so
                                  # two devices with the same name can't collide
     unit = unit_of(clients or {}, name)
-    can_write = bool(dev.writes_allowed) and dev.role != ROLE_OTHER
+    admin = is_admin()
+    can_write = bool(dev.writes_allowed) and dev.role != ROLE_OTHER and admin
     with col:
         if monitor.is_paused(name):
             st.subheader(f"⏸ {name}")
             st.warning(f"**Handed to QuickTune** — monitoring resumes "
                        f"{fmt_remaining(monitor.pause_remaining_s(name))}.")
-            if st.button("▶ Resume monitoring now", key=f"resume_{uid}", width="stretch"):
+            if admin and st.button("▶ Resume monitoring now", key=f"resume_{uid}",
+                                   width="stretch"):
                 monitor.resume_device(name)
                 if not monitor.pause_until and not monitor.pause_all_until:
                     monitor.resume_all()
@@ -730,6 +785,8 @@ def render_kiln_panel(col, dev: Device, state: ControllerState, bridge, monitor,
                                 st.error(f"start failed: {e}")
                 with st.expander(f"Preview program {program} segments"):
                     render_segments(name, program, monitor)
+            elif not admin:
+                st.caption("Read-only session: sign in as admin to run or stop.")
             else:
                 st.caption("Read-only: this controller is monitored and logged "
                            "but never driven. Change that on the Devices page.")
@@ -761,6 +818,8 @@ def _render_furnace_status(name: str, monitor, uid: str = "", unit: str = "°"):
     cc1, cc2 = st.columns([3, 2])
     with cc1:
         st.caption(f"Auto-recovery: {'🟢 **armed**' if armed else '🔴 **disarmed**'}")
+    if not is_admin():
+        return
     with cc2:
         if armed:
             if st.button("Disarm", key=f"disarm_{uid}", width="stretch",

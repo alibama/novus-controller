@@ -259,8 +259,10 @@ with tab_anneal:
                "into a permanent slot. Run it right after your process hold "
                "has crash-cooled to 900, or chain to it from another program. "
                "This grabs Bluetooth briefly.")
-    if not names:
-        st.info("No controllers configured yet — add one on the Settings page.")
+    if not core.is_admin():
+        st.caption("Read-only session: sign in as admin to write programs.")
+    elif not names:
+        st.info("No controllers configured yet — add one on the Devices page.")
     else:
         w1, w2 = st.columns([2, 1])
         w_name = w1.selectbox("Controller", names, key="learn_an_ctrl")

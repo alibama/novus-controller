@@ -162,14 +162,24 @@ note "ok."
 # ---- 4. secrets (never overwritten) ------------------------------------------
 say "Secrets"
 NEW_PASSWORD=""
+NEW_VIEWER=""
 NEW_TOKEN=0
 mkdir -p .streamlit
+gen_pw() { "$PY" -c 'import secrets,string; a=string.ascii_letters+string.digits; print("".join(secrets.choice(a) for _ in range(12)))'; }
 if [ ! -f .streamlit/secrets.toml ]; then
-  NEW_PASSWORD="$("$PY" -c 'import secrets,string; a=string.ascii_letters+string.digits; print("".join(secrets.choice(a) for _ in range(12)))')"
-  ( umask 077; printf 'dashboard_password = "%s"\n' "$NEW_PASSWORD" > .streamlit/secrets.toml )
-  note "created .streamlit/secrets.toml with a new dashboard password."
+  NEW_PASSWORD="$(gen_pw)"
+  NEW_VIEWER="$(gen_pw)"
+  ( umask 077; {
+      printf 'dashboard_password = "%s"   # admin: can run, stop, program, change settings\n' "$NEW_PASSWORD"
+      printf 'viewer_password = "%s"      # read-only: sees everything, changes nothing\n' "$NEW_VIEWER"
+    } > .streamlit/secrets.toml )
+  note "created .streamlit/secrets.toml with a new admin password and a read-only viewer password."
+elif ! grep -q '^viewer_password' .streamlit/secrets.toml; then
+  NEW_VIEWER="$(gen_pw)"
+  printf 'viewer_password = "%s"      # read-only: sees everything, changes nothing\n' "$NEW_VIEWER" >> .streamlit/secrets.toml
+  note ".streamlit/secrets.toml exists; kept your admin password, added a read-only viewer password."
 else
-  note ".streamlit/secrets.toml exists; keeping your password."
+  note ".streamlit/secrets.toml exists; keeping your passwords."
 fi
 chmod 600 .streamlit/secrets.toml 2>/dev/null || true
 
@@ -266,9 +276,12 @@ if [ "$WITH_API" = 1 ] && [ "$WITH_SERVICES" = 1 ]; then
   echo "  Open-data API: http://$HOST:8000   (docs at /docs)"
 fi
 echo
+if [ -n "$NEW_VIEWER" ]; then
+  echo "  Read-only password:  $NEW_VIEWER   (viewer account: sees everything, changes nothing)"
+fi
 if [ -n "$NEW_PASSWORD" ]; then
-  echo "  Dashboard password:  $NEW_PASSWORD"
-  echo "    (shown once; it lives in $NOVUS_DIR/.streamlit/secrets.toml - edit to change)"
+  echo "  Dashboard password:  $NEW_PASSWORD   (admin)"
+  echo "    (shown once; both live in $NOVUS_DIR/.streamlit/secrets.toml - edit to change)"
 else
   echo "  Dashboard password:  unchanged, in $NOVUS_DIR/.streamlit/secrets.toml"
 fi

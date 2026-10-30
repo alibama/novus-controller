@@ -32,6 +32,11 @@ st.title("⚙️ Settings")
 st.caption("Looking for the scanner or device roles? They moved to **Devices**. "
            "Studio name, energy rates and the API token are on **Open Data & API**.")
 
+if not core.is_admin():
+    core.viewer_note("Program writers, register console, notifications, Bluetooth "
+                     "settings and snapshots")
+    st.stop()
+
 names = [d.name for d in devices]
 writable = [d.name for d in devices if d.writes_allowed]
 if names and not writable:

@@ -40,7 +40,10 @@ Prefer Docker? `docker compose up -d` (Linux only; BlueZ over the host D-Bus —
 see the notes at the top of [`docker-compose.yml`](docker-compose.yml)).
 
 Then open `http://<that-machine>:8501`, enter the passphrase, and go to
-**Devices → Scan**.
+**Devices → Scan**. The installer also makes a **read-only viewer
+passphrase** for people who should watch but not touch. On a tailnet, two
+`tailscale serve` lines put it on `https://<machine>.<tailnet>.ts.net` with a
+real certificate — see [`docs/SETUP.md`](docs/SETUP.md#5b-https-for-the-dashboard--tailscale-no-certbot).
 
 ---
 

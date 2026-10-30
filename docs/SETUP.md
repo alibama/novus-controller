@@ -101,6 +101,50 @@ then paste the public base URL into **Open Data & API → Public URL**, and
 give `<public>/summary` to the Glass Database. Don't expose port 8501 to the
 internet; keep the dashboard on the LAN or tailnet.
 
+## 5b. HTTPS for the dashboard — Tailscale, no certbot
+
+If the box is on a tailnet, you already have a name like
+`shop.<tailnet>.ts.net` and Tailscale can issue a real Let's Encrypt
+certificate for it. **certbot can't** — Tailscale owns the `.ts.net` zone.
+One-time: in the admin console → DNS, turn on *MagicDNS* and *HTTPS
+Certificates*. Then on the shop box:
+
+```bash
+# dashboard → https://shop.<tailnet>.ts.net  (tailnet only; websockets work)
+sudo tailscale serve --bg --https=443 http://127.0.0.1:8501
+
+# API for people on the tailnet → https://shop.<tailnet>.ts.net:8443
+sudo tailscale serve --bg --https=8443 http://127.0.0.1:8000
+
+# API for the open internet (glassdatabase.org) → :10000
+sudo tailscale funnel --bg --https=10000 http://127.0.0.1:8000
+
+tailscale serve status
+```
+
+"Redirect HTTP to HTTPS" is simpler than a redirect: stop the plain port
+from answering. Put `DASHBOARD_ADDRESS=127.0.0.1` in `api.env` and
+`sudo systemctl restart kiln-dashboard`; from then on only the HTTPS name
+works and `http://shop:8501` is refused. Leave the API on `0.0.0.0` if
+LAN tools use it directly, or do the same with `--host` in the unit.
+
+Never Funnel the dashboard itself: it is password-gated, but it can drive
+kilns. Keep it tailnet-only (`serve`, not `funnel`).
+
+## 5c. Accounts
+
+Two passphrases live in `.streamlit/secrets.toml`:
+
+```toml
+dashboard_password = "…"   # admin: run/stop/program, pause for QuickTune, settings, token
+viewer_password    = "…"   # read-only: sees every page, changes nothing
+```
+
+The installer generates both (and adds `viewer_password` to an existing
+file that lacks it). Give the viewer passphrase to anyone who should watch
+the furnace from their phone without being able to touch it. The sidebar
+shows which kind of session you're in, with a sign-out link.
+
 ## 6. Bluetooth permissions and troubleshooting
 
 - Service user must be in the `bluetooth` group (the installer does this; a

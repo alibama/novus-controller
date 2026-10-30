@@ -68,64 +68,68 @@ with left:
                 st.warning(f"poll failed: {e}")
         st.rerun()
 
-    # ---- the one Bluetooth control ----------------------------------------
-    _ms = core.load_monitor_settings()
-    with b2.popover("📶 Bluetooth", width="stretch",
-                    help="Hand a controller to QuickTune, or change how often "
-                         "the monitor reads."):
-        # Forms, so the 5-second auto-refresh can't swallow a half-made choice:
-        # nothing happens until the button is pressed.
-        with st.form("bt_pause_form", border=False):
-            st.markdown("**Hand a controller to QuickTune**")
-            st.caption("A controller talks to one device at a time. While you use "
-                       "the phone app, the monitor stays off *that* controller and "
-                       "keeps watching the rest, then resumes on its own.")
-            who = st.multiselect("Controller(s)", names, placeholder="choose one or more")
-            every = st.checkbox("All of them (e.g. calibration, maintenance)")
-            mins = st.radio("For how long", [15, 30, 60, 120, 240], index=1,
-                            horizontal=True, format_func=lambda m: f"{m} min")
-            if st.form_submit_button("⏸ Pause monitoring", type="primary",
-                                     width="stretch"):
-                if not (who or every):
-                    st.warning("Pick a controller (or All of them) first.")
-                else:
-                    if every:
-                        core.release_ble(bridge, clients, monitor, minutes=mins)
+    if core.is_admin():
+        # ---- the one Bluetooth control ----------------------------------------
+        _ms = core.load_monitor_settings()
+        with b2.popover("📶 Bluetooth", width="stretch",
+                        help="Hand a controller to QuickTune, or change how often "
+                             "the monitor reads."):
+            # Forms, so the 5-second auto-refresh can't swallow a half-made choice:
+            # nothing happens until the button is pressed.
+            with st.form("bt_pause_form", border=False):
+                st.markdown("**Hand a controller to QuickTune**")
+                st.caption("A controller talks to one device at a time. While you use "
+                           "the phone app, the monitor stays off *that* controller and "
+                           "keeps watching the rest, then resumes on its own.")
+                who = st.multiselect("Controller(s)", names, placeholder="choose one or more")
+                every = st.checkbox("All of them (e.g. calibration, maintenance)")
+                mins = st.radio("For how long", [15, 30, 60, 120, 240], index=1,
+                                horizontal=True, format_func=lambda m: f"{m} min")
+                if st.form_submit_button("⏸ Pause monitoring", type="primary",
+                                         width="stretch"):
+                    if not (who or every):
+                        st.warning("Pick a controller (or All of them) first.")
                     else:
-                        for n in who:
-                            monitor.pause_device(n, mins)
-                            try:
-                                bridge.call(clients[n].disconnect(), timeout=8)
-                            except Exception:
-                                pass
-                    monitor._write_live()
+                        if every:
+                            core.release_ble(bridge, clients, monitor, minutes=mins)
+                        else:
+                            for n in who:
+                                monitor.pause_device(n, mins)
+                                try:
+                                    bridge.call(clients[n].disconnect(), timeout=8)
+                                except Exception:
+                                    pass
+                        monitor._write_live()
+                        st.rerun()
+            st.divider()
+            with st.form("bt_settings_form", border=False):
+                st.markdown("**How often to read**")
+                poll_min = st.slider("Read every (minutes)", 1, 15,
+                                     int(round(_ms.get("poll_interval_s", 300) / 60)),
+                                     help="Each read holds a controller's Bluetooth for "
+                                          "a second or two. Longer = fewer collisions "
+                                          "with QuickTune, coarser charts. 3–5 is a good "
+                                          "balance; 1 only while troubleshooting.")
+                coop = st.toggle("Cooperative (disconnect between reads)",
+                                 value=bool(_ms.get("cooperative", True)),
+                                 help="Keep this on. Off = the monitor holds connections "
+                                      "and QuickTune can never get in.")
+                if st.form_submit_button("Save", width="stretch"):
+                    core.save_monitor_settings({"cooperative": bool(coop),
+                                                "poll_interval_s": float(poll_min * 60)})
+                    monitor.cooperative = bool(coop)
+                    monitor.poll_interval_s = float(poll_min * 60)
                     st.rerun()
-        st.divider()
-        with st.form("bt_settings_form", border=False):
-            st.markdown("**How often to read**")
-            poll_min = st.slider("Read every (minutes)", 1, 15,
-                                 int(round(_ms.get("poll_interval_s", 300) / 60)),
-                                 help="Each read holds a controller's Bluetooth for "
-                                      "a second or two. Longer = fewer collisions "
-                                      "with QuickTune, coarser charts. 3–5 is a good "
-                                      "balance; 1 only while troubleshooting.")
-            coop = st.toggle("Cooperative (disconnect between reads)",
-                             value=bool(_ms.get("cooperative", True)),
-                             help="Keep this on. Off = the monitor holds connections "
-                                  "and QuickTune can never get in.")
-            if st.form_submit_button("Save", width="stretch"):
-                core.save_monitor_settings({"cooperative": bool(coop),
-                                            "poll_interval_s": float(poll_min * 60)})
-                monitor.cooperative = bool(coop)
-                monitor.poll_interval_s = float(poll_min * 60)
-                st.rerun()
 
+    else:
+        b2.caption("👁 read-only")
     paused_names = [n for n in names if monitor.is_paused(n)]
     if monitor.is_paused():
         st.warning("⏸ **All monitoring paused for QuickTune** — resumes "
                    f"{core.fmt_remaining(monitor.pause_remaining_s())}. The "
                    "watchdog is off while paused.")
-        if st.button("▶ Resume everything now", type="primary", width="stretch"):
+        if core.is_admin() and st.button("▶ Resume everything now", type="primary",
+                                         width="stretch"):
             core.reclaim_ble(bridge, clients, monitor)
             st.rerun()
     elif paused_names:

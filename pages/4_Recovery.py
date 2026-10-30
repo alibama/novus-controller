@@ -32,6 +32,8 @@ st.caption("Program 1 is the 'set and forget' hold on every controller. The "
 # quick auto-refresh so the live state stays current
 from streamlit_autorefresh import st_autorefresh
 st_autorefresh(interval=5000, key="recovery-refresh")
+if not core.is_admin():
+    core.viewer_note("Arm/disarm, overrides, running programs and logic edits")
 
 
 def _fmt_secs(s):
@@ -94,143 +96,144 @@ for dev in devices:
         if det:
             st.caption(" · ".join(det))
 
-        # ---- arm / disarm ----
-        ac1, ac2, ac3 = st.columns(3)
-        if armed:
-            if ac1.button("🔴 Disarm auto-recovery", key=f"dis_{dev.name}_{_uid}",
-                          width="stretch"):
-                monitor.recovery_armed[dev.name] = False
-                st.rerun()
-        else:
-            if ac1.button("🟢 Re-arm auto-recovery", key=f"arm_{dev.name}_{_uid}",
-                          type="primary", width="stretch"):
-                monitor.recovery_armed[dev.name] = True
-                if ws:
-                    ws.needs_human = False
-                    ws.last_alerted_case = None
-                st.rerun()
-
-        # ---- manual override: push to any temperature now ----
-        with ac2.popover("🎛 Manual override", width="stretch"):
-            st.caption("Hold a fixed temperature right now (no program). Use to "
-                       "push higher, or hold a custom target. Disarms "
-                       "auto-recovery so it won't fight you.")
-            tgt = st.number_input("Target °F", min_value=100, max_value=2400,
-                                  value=int(s.sp or cfg.expected_setpoint if cfg else 2100),
-                                  step=10, key=f"ovr_{dev.name}_{_uid}")
-            if st.button("Apply override", key=f"ovrgo_{dev.name}_{_uid}", type="primary"):
-                with st.spinner("Grabbing Bluetooth and setting…"):
-                    try:
-                        r = bridge.call(monitor.control(dev.name, "set_manual_setpoint",
-                                                        float(tgt)), timeout=30)
-                        monitor.recovery_armed[dev.name] = False
-                        if isinstance(r, dict) and r.get("clamped"):
-                            st.error(f"Asked for {int(tgt)}° but the controller now "
-                                     f"reads SP {r.get('actual')}. It ignored or clamped "
-                                     "the write — a password-protected controller, or "
-                                     "setpoint limits. Run **Diagnose** on the Devices "
-                                     "page to see which.")
-                        else:
-                            st.success(f"Holding {int(tgt)}° manually (confirmed by "
-                                       "read-back). Auto-recovery disarmed — Re-arm "
-                                       "when you go back to program 1.")
-                    except Exception as e:
-                        st.error(f"override failed: {e}")
-
-        with ac3.popover("▶ Run a program", width="stretch"):
-            prog = st.selectbox("Program", range(1, 21), key=f"rp_{dev.name}_{_uid}")
-            if st.button("Run", key=f"rpgo_{dev.name}_{_uid}", type="primary"):
-                with st.spinner("Starting…"):
-                    try:
-                        bridge.call(monitor.control(dev.name, "run_program", int(prog)),
-                                    timeout=30)
-                        monitor.recovery_armed[dev.name] = (int(prog) == (cfg.hold_program if cfg else 1))
-                        st.success(f"Running program {prog}.")
-                    except Exception as e:
-                        st.error(f"run failed: {e}")
-
-        # ---- editable logic ----
-        if cfg:
-            with st.expander("⚙️ Edit this controller's recovery logic"):
-                e1, e2, e3 = st.columns(3)
-                cfg.enabled = e1.checkbox("Watchdog enabled", value=cfg.enabled,
-                                          key=f"en_{dev.name}_{_uid}")
-                cfg.keep_hot = e2.checkbox(
-                    "Keep hot from any state", value=cfg.keep_hot, key=f"kh_{dev.name}_{_uid}",
-                    help="On: restart even when stopped (a furnace, or a kiln you're "
-                         "parking warm). Off: only rescue an active program-1 hold.")
-                cfg.recover_on_cant_hold = e3.checkbox(
-                    "Restart on 'can't hold'", value=cfg.recover_on_cant_hold,
-                    key=f"ch_{dev.name}_{_uid}",
-                    help="Restart when output is pinned but temperature is falling "
-                         "(a re-latchable SSR/contactor fault).")
-
-                f1, f2, f3 = st.columns(3)
-                cfg.expected_setpoint = f1.number_input(
-                    "Hold target °F", value=float(cfg.expected_setpoint), step=10.0,
-                    key=f"es_{dev.name}_{_uid}")
-                new_thr = f2.number_input(
-                    "Restart if below °F", value=float(low_line or 0), step=10.0,
-                    key=f"th_{dev.name}_{_uid}",
-                    help="The trigger temperature. Below this (and not recovering) "
-                         "→ restart.")
-                cfg.hold_program = f3.number_input(
-                    "Hold program #", min_value=1, max_value=20,
-                    value=int(cfg.hold_program or 1), key=f"hp_{dev.name}_{_uid}")
-
-                g1, g2, g3 = st.columns(3)
-                cfg.dropout_confirm_s = g1.number_input(
-                    "Dropout confirm (s)", value=float(cfg.dropout_confirm_s),
-                    step=10.0, key=f"dc_{dev.name}_{_uid}",
-                    help="Stopped + low: wait this long, then restart.")
-                cfg.cant_hold_confirm_s = g2.number_input(
-                    "Can't-hold confirm (s)", value=float(cfg.cant_hold_confirm_s),
-                    step=10.0, key=f"cc_{dev.name}_{_uid}",
-                    help="Running, pinned, falling: wait this long, then restart.")
-                cfg.confirm_after_s = g3.number_input(
-                    "Recovery confirm window (s)", value=float(cfg.confirm_after_s),
-                    step=10.0, key=f"ca_{dev.name}_{_uid}",
-                    help="After a restart, temperature must rise within this long.")
-
-                h1, h2, h3 = st.columns(3)
-                cfg.recover_floor = h1.number_input(
-                    "Don't auto-drive below °F", value=float(cfg.recover_floor),
-                    step=50.0, key=f"rf_{dev.name}_{_uid}",
-                    help="Below this the reading is too low/uncertain to trust — "
-                         "alert a human instead of driving.")
-                cfg.max_recoveries = int(h2.number_input(
-                    "Max restarts / hour", min_value=1, max_value=30,
-                    value=int(cfg.max_recoveries), key=f"mr_{dev.name}_{_uid}",
-                    help="After this many in an hour, give up and stop (recurring "
-                         "fault needs a human)."))
-                cfg.low_margin = h3.number_input(
-                    "Low margin °F (if no trigger set)", value=float(cfg.low_margin),
-                    step=10.0, key=f"lm_{dev.name}_{_uid}")
-
-                i1, i2, i3 = st.columns(3)
-                cfg.high_margin = i1.number_input(
-                    "Over-temp margin °F", value=float(cfg.high_margin), step=10.0,
-                    key=f"hm_{dev.name}_{_uid}",
-                    help="PV this far ABOVE the live setpoint = over-temperature. "
-                         "Output ~0% and not falling → stuck SSR/contactor alert "
-                         "(software can't fix it). Output still high → STOP + alert.")
-                cfg.overtemp_confirm_s = i2.number_input(
-                    "Over-temp confirm (s)", value=float(cfg.overtemp_confirm_s),
-                    step=30.0, key=f"oc_{dev.name}_{_uid}")
-                cfg.trend_window_s = i3.number_input(
-                    "Trend window (s)", value=float(cfg.trend_window_s), step=30.0,
-                    key=f"tw_{dev.name}_{_uid}",
-                    help="'Is it climbing?' is judged over this window, so a slow "
-                         "heat-up isn't mistaken for a can't-hold fault.")
-
-                if st.button("💾 Save this controller's logic", key=f"sv_{dev.name}_{_uid}",
-                             type="primary"):
-                    monitor.recover_threshold[dev.name] = float(new_thr)
-                    core.save_watchdog_settings(monitor)
-                    if ws:
-                        ws.last_alerted_case = None
-                    st.success("Saved and applied. (Persists across restarts.)")
+        if core.is_admin():
+            # ---- arm / disarm ----
+            ac1, ac2, ac3 = st.columns(3)
+            if armed:
+                if ac1.button("🔴 Disarm auto-recovery", key=f"dis_{dev.name}_{_uid}",
+                              width="stretch"):
+                    monitor.recovery_armed[dev.name] = False
                     st.rerun()
+            else:
+                if ac1.button("🟢 Re-arm auto-recovery", key=f"arm_{dev.name}_{_uid}",
+                              type="primary", width="stretch"):
+                    monitor.recovery_armed[dev.name] = True
+                    if ws:
+                        ws.needs_human = False
+                        ws.last_alerted_case = None
+                    st.rerun()
+
+            # ---- manual override: push to any temperature now ----
+            with ac2.popover("🎛 Manual override", width="stretch"):
+                st.caption("Hold a fixed temperature right now (no program). Use to "
+                           "push higher, or hold a custom target. Disarms "
+                           "auto-recovery so it won't fight you.")
+                tgt = st.number_input("Target °F", min_value=100, max_value=2400,
+                                      value=int(s.sp or cfg.expected_setpoint if cfg else 2100),
+                                      step=10, key=f"ovr_{dev.name}_{_uid}")
+                if st.button("Apply override", key=f"ovrgo_{dev.name}_{_uid}", type="primary"):
+                    with st.spinner("Grabbing Bluetooth and setting…"):
+                        try:
+                            r = bridge.call(monitor.control(dev.name, "set_manual_setpoint",
+                                                            float(tgt)), timeout=30)
+                            monitor.recovery_armed[dev.name] = False
+                            if isinstance(r, dict) and r.get("clamped"):
+                                st.error(f"Asked for {int(tgt)}° but the controller now "
+                                         f"reads SP {r.get('actual')}. It ignored or clamped "
+                                         "the write — a password-protected controller, or "
+                                         "setpoint limits. Run **Diagnose** on the Devices "
+                                         "page to see which.")
+                            else:
+                                st.success(f"Holding {int(tgt)}° manually (confirmed by "
+                                           "read-back). Auto-recovery disarmed — Re-arm "
+                                           "when you go back to program 1.")
+                        except Exception as e:
+                            st.error(f"override failed: {e}")
+
+            with ac3.popover("▶ Run a program", width="stretch"):
+                prog = st.selectbox("Program", range(1, 21), key=f"rp_{dev.name}_{_uid}")
+                if st.button("Run", key=f"rpgo_{dev.name}_{_uid}", type="primary"):
+                    with st.spinner("Starting…"):
+                        try:
+                            bridge.call(monitor.control(dev.name, "run_program", int(prog)),
+                                        timeout=30)
+                            monitor.recovery_armed[dev.name] = (int(prog) == (cfg.hold_program if cfg else 1))
+                            st.success(f"Running program {prog}.")
+                        except Exception as e:
+                            st.error(f"run failed: {e}")
+
+            # ---- editable logic ----
+            if cfg:
+                with st.expander("⚙️ Edit this controller's recovery logic"):
+                    e1, e2, e3 = st.columns(3)
+                    cfg.enabled = e1.checkbox("Watchdog enabled", value=cfg.enabled,
+                                              key=f"en_{dev.name}_{_uid}")
+                    cfg.keep_hot = e2.checkbox(
+                        "Keep hot from any state", value=cfg.keep_hot, key=f"kh_{dev.name}_{_uid}",
+                        help="On: restart even when stopped (a furnace, or a kiln you're "
+                             "parking warm). Off: only rescue an active program-1 hold.")
+                    cfg.recover_on_cant_hold = e3.checkbox(
+                        "Restart on 'can't hold'", value=cfg.recover_on_cant_hold,
+                        key=f"ch_{dev.name}_{_uid}",
+                        help="Restart when output is pinned but temperature is falling "
+                             "(a re-latchable SSR/contactor fault).")
+
+                    f1, f2, f3 = st.columns(3)
+                    cfg.expected_setpoint = f1.number_input(
+                        "Hold target °F", value=float(cfg.expected_setpoint), step=10.0,
+                        key=f"es_{dev.name}_{_uid}")
+                    new_thr = f2.number_input(
+                        "Restart if below °F", value=float(low_line or 0), step=10.0,
+                        key=f"th_{dev.name}_{_uid}",
+                        help="The trigger temperature. Below this (and not recovering) "
+                             "→ restart.")
+                    cfg.hold_program = f3.number_input(
+                        "Hold program #", min_value=1, max_value=20,
+                        value=int(cfg.hold_program or 1), key=f"hp_{dev.name}_{_uid}")
+
+                    g1, g2, g3 = st.columns(3)
+                    cfg.dropout_confirm_s = g1.number_input(
+                        "Dropout confirm (s)", value=float(cfg.dropout_confirm_s),
+                        step=10.0, key=f"dc_{dev.name}_{_uid}",
+                        help="Stopped + low: wait this long, then restart.")
+                    cfg.cant_hold_confirm_s = g2.number_input(
+                        "Can't-hold confirm (s)", value=float(cfg.cant_hold_confirm_s),
+                        step=10.0, key=f"cc_{dev.name}_{_uid}",
+                        help="Running, pinned, falling: wait this long, then restart.")
+                    cfg.confirm_after_s = g3.number_input(
+                        "Recovery confirm window (s)", value=float(cfg.confirm_after_s),
+                        step=10.0, key=f"ca_{dev.name}_{_uid}",
+                        help="After a restart, temperature must rise within this long.")
+
+                    h1, h2, h3 = st.columns(3)
+                    cfg.recover_floor = h1.number_input(
+                        "Don't auto-drive below °F", value=float(cfg.recover_floor),
+                        step=50.0, key=f"rf_{dev.name}_{_uid}",
+                        help="Below this the reading is too low/uncertain to trust — "
+                             "alert a human instead of driving.")
+                    cfg.max_recoveries = int(h2.number_input(
+                        "Max restarts / hour", min_value=1, max_value=30,
+                        value=int(cfg.max_recoveries), key=f"mr_{dev.name}_{_uid}",
+                        help="After this many in an hour, give up and stop (recurring "
+                             "fault needs a human)."))
+                    cfg.low_margin = h3.number_input(
+                        "Low margin °F (if no trigger set)", value=float(cfg.low_margin),
+                        step=10.0, key=f"lm_{dev.name}_{_uid}")
+
+                    i1, i2, i3 = st.columns(3)
+                    cfg.high_margin = i1.number_input(
+                        "Over-temp margin °F", value=float(cfg.high_margin), step=10.0,
+                        key=f"hm_{dev.name}_{_uid}",
+                        help="PV this far ABOVE the live setpoint = over-temperature. "
+                             "Output ~0% and not falling → stuck SSR/contactor alert "
+                             "(software can't fix it). Output still high → STOP + alert.")
+                    cfg.overtemp_confirm_s = i2.number_input(
+                        "Over-temp confirm (s)", value=float(cfg.overtemp_confirm_s),
+                        step=30.0, key=f"oc_{dev.name}_{_uid}")
+                    cfg.trend_window_s = i3.number_input(
+                        "Trend window (s)", value=float(cfg.trend_window_s), step=30.0,
+                        key=f"tw_{dev.name}_{_uid}",
+                        help="'Is it climbing?' is judged over this window, so a slow "
+                             "heat-up isn't mistaken for a can't-hold fault.")
+
+                    if st.button("💾 Save this controller's logic", key=f"sv_{dev.name}_{_uid}",
+                                 type="primary"):
+                        monitor.recover_threshold[dev.name] = float(new_thr)
+                        core.save_watchdog_settings(monitor)
+                        if ws:
+                            ws.last_alerted_case = None
+                        st.success("Saved and applied. (Persists across restarts.)")
+                        st.rerun()
 
 st.divider()
 st.subheader("Recent events")

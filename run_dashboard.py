@@ -24,11 +24,15 @@ HERE = Path(__file__).resolve().parent
 
 
 def _flag_options(argv: list[str]) -> dict:
+    """Defaults < DASHBOARD_ADDRESS / DASHBOARD_PORT env (api.env, loaded by
+    the service) < command-line flags. Set DASHBOARD_ADDRESS=127.0.0.1 when
+    `tailscale serve` (or a reverse proxy) fronts the dashboard, so plain
+    http://host:8501 stops answering and only the HTTPS name works."""
     opts = {
         "server.headless": True,
         "browser.gatherUsageStats": False,
-        "server.address": "0.0.0.0",
-        "server.port": 8501,
+        "server.address": os.environ.get("DASHBOARD_ADDRESS") or "0.0.0.0",
+        "server.port": os.environ.get("DASHBOARD_PORT") or 8501,
     }
     i = 0
     while i < len(argv):

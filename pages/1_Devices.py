@@ -35,6 +35,21 @@ ROLE_LABEL = {ROLE_KILN: "Kiln (runs programs)",
               ROLE_FURNACE: "Furnace (keep hot, watch & recover)",
               ROLE_OTHER: "Other (monitor only)"}
 
+if not core.is_admin():
+    core.viewer_note("Scanning, adding, editing and diagnosing controllers")
+    if not devices:
+        st.caption("No controllers configured yet.")
+    for d in devices:
+        s = core.latest_state(monitor, d)
+        head = {"furnace": "🔥", "kiln": "🪟", "other": "📟"}.get(d.role, "📟")
+        live = (f"PV {s.pv:g}{core.unit_of(clients, d.name)} · SP {s.sp:g} · "
+                f"output {s.output_pct:g}%" if s.connected and s.pv is not None
+                else "no recent reading")
+        st.markdown(f"- {head} **{d.name}** — {ROLE_LABEL.get(d.role, d.role)} · "
+                    f"{novus_models.describe(d.model)} · {live}"
+                    + ("" if d.writes_allowed else " · read-only"))
+    st.stop()
+
 
 def _apply_and_rerun(devs: list[Device], msg: str):
     problems = validate(devs)

@@ -3,6 +3,21 @@
 All notable changes to this project are documented here. This project follows
 [Semantic Versioning](https://semver.org/) loosely.
 
+## [2.3.0] — 2026-10-30
+
+### Added
+- **Read-only viewer account.** A second passphrase (`viewer_password` in
+  `.streamlit/secrets.toml`; the installer generates it and adds it to an
+  existing file) opens every page but hides everything that writes: RUN/STOP,
+  arm/disarm, overrides, the QuickTune hand-off, Devices/Settings editors,
+  the Learn page's program writer, the API token and studio settings. The
+  sidebar shows the session kind with a sign-out link.
+- `DASHBOARD_ADDRESS` / `DASHBOARD_PORT` in `api.env`, read by
+  `run_dashboard.py`, so the dashboard can bind to 127.0.0.1 behind
+  `tailscale serve` / a reverse proxy and the plain-HTTP port goes dark.
+- SETUP: HTTPS via `tailscale serve` (Tailscale issues the `.ts.net`
+  certificate; certbot can't), Funnel for the public API, and the accounts.
+
 ## [2.2.0] — 2026-10-30
 
 ### Fixed (important)
